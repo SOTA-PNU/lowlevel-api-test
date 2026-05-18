@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  triton-dev:
+    image: triton-local-build:latest
+    container_name: triton-dev-container
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ..:/workspace
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    working_dir: /workspace
+    command: bash
+    stdin_open: true
+    tty: true
+
+  triton-jupyter:
+    image: triton-local-build:latest
+    container_name: triton-jupyter-container
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ..:/workspace
+    ports:
+      - "8888:8888"
+    working_dir: /workspace
+    command: bash -c "pip install jupyter && jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
+    stdin_open: true
+    tty: true
+
+  triton-test:
+    image: triton-local-build:latest
+    container_name: triton-test-runner
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ..:/workspace
+    working_dir: /workspace
+    command: python triton_test.py --local-triton
+    stdin_open: true
+    tty: true
+
+  triton-test-detailed:
+    image: triton-local-build:latest
+    container_name: triton-test-detailed-runner
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - ..:/workspace
+    working_dir: /workspace
+    command: python triton_test.py --local-triton --detailed
+    stdin_open: true
+    tty: true
