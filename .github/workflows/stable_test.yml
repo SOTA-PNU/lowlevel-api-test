@@ -1,0 +1,494 @@
+name: Stable Test
+
+"on":
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Force Docker image rebuild
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      enable_release:
+        description: Push release Docker tags
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+env:
+  GIT_SUBMODULE_STRATEGY: recursive
+  DOCKER_IMAGE_LOCAL: triton-local-build
+  DOCKER_IMAGE: triton-local-build
+  ENABLE_RELEASE: "false"
+
+jobs:
+  detect-changes:
+    name: Detect Build Inputs
+    runs-on: self-hosted
+    outputs:
+      should_build: ${{ steps.filter.outputs.should_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 2
+
+      - name: Detect relevant changes
+        id: filter
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+        run: |
+          set -euo pipefail
+
+          if [ "${FORCE_BUILD:-false}" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${BEFORE:-}" ] || [[ "$BEFORE" =~ ^0+$ ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed_files="$(git diff --name-only "$BEFORE" "$SHA" || true)"
+          echo "$changed_files"
+
+          if echo "$changed_files" | grep -Eq '^(docker/Dockerfile|triton($|/)|\.gitmodules|requirements\.txt|setup\.py)$'; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  env-cpu:
+    name: Prepare CPU Environment
+    runs-on: [self-hosted, cpu-runner]
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
+    outputs:
+      build_mode: ${{ steps.detect.outputs.build_mode }}
+      cuda_version: ${{ steps.detect.outputs.cuda_version }}
+      cuda_architecture: ${{ steps.detect.outputs.cuda_architecture }}
+      pytorch_cuda_version: ${{ steps.detect.outputs.pytorch_cuda_version }}
+    steps:
+      - name: Detect environment
+        id: detect
+        shell: bash
+        env:
+          BUILD_ARGS: build_args.cpu.env
+        run: |
+          set -euo pipefail
+          echo ">>> Detecting environment..."
+
+          {
+            echo "BUILD_MODE=cpu"
+            echo "CUDA_VERSION=none"
+            echo "CUDA_ARCHITECTURE=none"
+            echo "PYTORCH_CUDA_VERSION=cpu"
+          } > "$BUILD_ARGS"
+
+          cat "$BUILD_ARGS"
+          {
+            echo "build_mode=cpu"
+            echo "cuda_version=none"
+            echo "cuda_architecture=none"
+            echo "pytorch_cuda_version=cpu"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload build args
+        uses: actions/upload-artifact@v4
+        with:
+          name: build_args.cpu.env-${{ github.sha }}
+          path: build_args.cpu.env
+          retention-days: 7
+
+  env-gpu:
+    name: Prepare GPU Environment
+    runs-on: [self-hosted, gpu-runner]
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
+    outputs:
+      build_mode: ${{ steps.detect.outputs.build_mode }}
+      cuda_version: ${{ steps.detect.outputs.cuda_version }}
+      cuda_architecture: ${{ steps.detect.outputs.cuda_architecture }}
+      pytorch_cuda_version: ${{ steps.detect.outputs.pytorch_cuda_version }}
+    steps:
+      - name: Detect environment
+        id: detect
+        shell: bash
+        env:
+          BUILD_ARGS: build_args.gpu.env
+        run: |
+          set -euo pipefail
+          echo ">>> Detecting environment..."
+
+          {
+            echo "BUILD_MODE=cpu"
+            echo "CUDA_VERSION=none"
+            echo "CUDA_ARCHITECTURE=none"
+            echo "PYTORCH_CUDA_VERSION=cpu"
+          } > "$BUILD_ARGS"
+
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            {
+              echo "BUILD_MODE=cuda"
+              echo "CUDA_VERSION=12.6"
+
+              GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
+              case "$GPU_NAME" in
+                *"Blackwell"*|*"RTX PRO 6000"*)
+                  echo "CUDA_ARCHITECTURE=sm_120"
+                  echo "PYTORCH_CUDA_VERSION=cu124"
+                  ;;
+                *"Hopper"*|*"H100"*)
+                  echo "CUDA_ARCHITECTURE=sm_90"
+                  echo "PYTORCH_CUDA_VERSION=cu121"
+                  ;;
+                *"Ampere"*|*"A100"*|*"RTX 30"*|*"RTX 40"*)
+                  echo "CUDA_ARCHITECTURE=sm_80"
+                  echo "PYTORCH_CUDA_VERSION=cu121"
+                  ;;
+                *)
+                  echo "CUDA_ARCHITECTURE=sm_80"
+                  echo "PYTORCH_CUDA_VERSION=cu121"
+                  ;;
+              esac
+            } > "$BUILD_ARGS"
+          fi
+
+          cat "$BUILD_ARGS"
+          {
+            echo "build_mode=$(grep '^BUILD_MODE=' "$BUILD_ARGS" | cut -d= -f2-)"
+            echo "cuda_version=$(grep '^CUDA_VERSION=' "$BUILD_ARGS" | cut -d= -f2-)"
+            echo "cuda_architecture=$(grep '^CUDA_ARCHITECTURE=' "$BUILD_ARGS" | cut -d= -f2-)"
+            echo "pytorch_cuda_version=$(grep '^PYTORCH_CUDA_VERSION=' "$BUILD_ARGS" | cut -d= -f2-)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload build args
+        uses: actions/upload-artifact@v4
+        with:
+          name: build_args.gpu.env-${{ github.sha }}
+          path: build_args.gpu.env
+          retention-days: 7
+
+  env-npu:
+    name: Prepare NPU Environment
+    runs-on: [self-hosted, npu-runner]
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
+    outputs:
+      build_mode: ${{ steps.detect.outputs.build_mode }}
+      cuda_version: ${{ steps.detect.outputs.cuda_version }}
+      cuda_architecture: ${{ steps.detect.outputs.cuda_architecture }}
+      pytorch_cuda_version: ${{ steps.detect.outputs.pytorch_cuda_version }}
+    steps:
+      - name: Detect environment
+        id: detect
+        shell: bash
+        env:
+          BUILD_ARGS: build_args.npu.env
+        run: |
+          set -euo pipefail
+          echo ">>> Detecting environment..."
+
+          {
+            echo "BUILD_MODE=cpu"
+            echo "CUDA_VERSION=none"
+            echo "CUDA_ARCHITECTURE=none"
+            echo "PYTORCH_CUDA_VERSION=cpu"
+          } > "$BUILD_ARGS"
+
+          cat "$BUILD_ARGS"
+          {
+            echo "build_mode=cpu"
+            echo "cuda_version=none"
+            echo "cuda_architecture=none"
+            echo "pytorch_cuda_version=cpu"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload build args
+        uses: actions/upload-artifact@v4
+        with:
+          name: build_args.npu.env-${{ github.sha }}
+          path: build_args.npu.env
+          retention-days: 7
+
+  build-cpu:
+    name: Build CPU Image
+    runs-on: [self-hosted, cpu-runner]
+    needs: env-cpu
+    if: ${{ needs.env-cpu.result == 'success' }}
+    env:
+      DOCKER_IMAGE_TAG: cpu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Docker image
+        shell: bash
+        env:
+          BUILD_MODE: ${{ needs.env-cpu.outputs.build_mode }}
+          CUDA_VERSION: ${{ needs.env-cpu.outputs.cuda_version }}
+          CUDA_ARCHITECTURE: ${{ needs.env-cpu.outputs.cuda_architecture }}
+          PYTORCH_CUDA_VERSION: ${{ needs.env-cpu.outputs.pytorch_cuda_version }}
+        run: |
+          set -euo pipefail
+          echo ">>> Building Docker image with host Docker"
+          docker build \
+            --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            -f docker/Dockerfile \
+            -t "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            --build-arg BUILD_MODE="$BUILD_MODE" \
+            --build-arg CUDA_VERSION="$CUDA_VERSION" \
+            --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
+            --build-arg PYTORCH_CUDA_VERSION="$PYTORCH_CUDA_VERSION" \
+            .
+          docker image prune -f
+          docker system df
+
+  build-gpu:
+    name: Build GPU Image
+    runs-on: [self-hosted, gpu-runner]
+    needs: env-gpu
+    if: ${{ needs.env-gpu.result == 'success' }}
+    env:
+      DOCKER_IMAGE_TAG: gpu-latest
+      NVIDIA_VISIBLE_DEVICES: void
+      NVIDIA_DRIVER_CAPABILITIES: ""
+      NVIDIA_DISABLE_REQUIRE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Docker image
+        shell: bash
+        env:
+          BUILD_MODE: ${{ needs.env-gpu.outputs.build_mode }}
+          CUDA_VERSION: ${{ needs.env-gpu.outputs.cuda_version }}
+          CUDA_ARCHITECTURE: ${{ needs.env-gpu.outputs.cuda_architecture }}
+          PYTORCH_CUDA_VERSION: ${{ needs.env-gpu.outputs.pytorch_cuda_version }}
+        run: |
+          set -euo pipefail
+          echo ">>> Building Docker image with host Docker"
+          docker build \
+            --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            -f docker/Dockerfile \
+            -t "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            --build-arg BUILD_MODE="$BUILD_MODE" \
+            --build-arg CUDA_VERSION="$CUDA_VERSION" \
+            --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
+            --build-arg PYTORCH_CUDA_VERSION="$PYTORCH_CUDA_VERSION" \
+            .
+          docker image prune -f
+          docker system df
+
+  build-npu:
+    name: Build NPU Image
+    runs-on: [self-hosted, npu-runner]
+    needs: env-npu
+    if: ${{ needs.env-npu.result == 'success' }}
+    env:
+      DOCKER_IMAGE_TAG: npu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build Docker image
+        shell: bash
+        env:
+          BUILD_MODE: ${{ needs.env-npu.outputs.build_mode }}
+          CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
+          CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
+          PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
+        run: |
+          set -euo pipefail
+          echo ">>> Building Docker image with host Docker"
+          docker build \
+            --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            -f docker/Dockerfile \
+            -t "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            --build-arg BUILD_MODE="$BUILD_MODE" \
+            --build-arg CUDA_VERSION="$CUDA_VERSION" \
+            --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
+            --build-arg PYTORCH_CUDA_VERSION="$PYTORCH_CUDA_VERSION" \
+            .
+          docker image prune -f
+          docker system df
+
+  test-cpu:
+    name: Test CPU Image
+    runs-on: [self-hosted, cpu-runner]
+    needs:
+      - detect-changes
+      - build-cpu
+    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-cpu.result == 'success' || needs.build-cpu.result == 'skipped') }}
+    env:
+      DOCKER_IMAGE_TAG: cpu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset DOCKER_HOST DOCKER_TLS_CERTDIR
+          docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          sh docker/run-docker.sh test
+
+  test-gpu:
+    name: Test GPU Image
+    runs-on: [self-hosted, gpu-runner]
+    needs:
+      - detect-changes
+      - build-gpu
+    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-gpu.result == 'success' || needs.build-gpu.result == 'skipped') }}
+    env:
+      DOCKER_IMAGE_TAG: gpu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset DOCKER_HOST DOCKER_TLS_CERTDIR
+          docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          sh docker/run-docker.sh test
+
+  test-npu:
+    name: Test NPU Image
+    runs-on: [self-hosted, npu-runner]
+    needs:
+      - detect-changes
+      - build-npu
+    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-npu.result == 'success' || needs.build-npu.result == 'skipped') }}
+    env:
+      DOCKER_IMAGE_TAG: npu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset DOCKER_HOST DOCKER_TLS_CERTDIR
+          docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          sh docker/run-docker.sh test
+
+  release-cpu:
+    name: Release CPU Image
+    runs-on: [self-hosted, cpu-runner]
+    needs: test-cpu
+    if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || inputs.enable_release == 'true') }}
+    env:
+      ENV_TAG: cpu
+      DOCKER_IMAGE_TAG: cpu-latest
+    steps:
+      - name: Push release image
+        shell: bash
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
+            docker push "${DOCKER_IMAGE}:main-${ENV_TAG}"
+          fi
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+            docker push "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+          fi
+
+  release-gpu:
+    name: Release GPU Image
+    runs-on: [self-hosted, gpu-runner]
+    needs: test-gpu
+    if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || inputs.enable_release == 'true') }}
+    env:
+      ENV_TAG: gpu
+      DOCKER_IMAGE_TAG: gpu-latest
+    steps:
+      - name: Push release image
+        shell: bash
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
+            docker push "${DOCKER_IMAGE}:main-${ENV_TAG}"
+          fi
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+            docker push "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+          fi
+
+  release-npu:
+    name: Release NPU Image
+    runs-on: [self-hosted, npu-runner]
+    needs: test-npu
+    if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || inputs.enable_release == 'true') }}
+    env:
+      ENV_TAG: npu
+      DOCKER_IMAGE_TAG: npu-latest
+    steps:
+      - name: Push release image
+        shell: bash
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
+            docker push "${DOCKER_IMAGE}:main-${ENV_TAG}"
+          fi
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+            docker push "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+          fi
