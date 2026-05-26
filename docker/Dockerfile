@@ -183,6 +183,9 @@ RUN chmod +x /workspace/detect_and_build.sh
 # Run the detection and build script with BUILD_MODE environment variable
 RUN BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh
 
+# Keep --local-triton imports pointed at the built source tree.
+RUN rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton
+
 # Verify the build artifacts are present (only for CUDA builds)
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         ls -la /opt/triton-src/python/triton/_C/ || echo "Build artifacts verification failed"; \
