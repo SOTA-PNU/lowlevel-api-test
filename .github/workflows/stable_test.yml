@@ -51,7 +51,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
           REF_TYPE: ${{ github.ref_type }}
-          FORCE_BUILD: ${{ inputs.force_build }}
+          FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.force_build || 'false' }}
         run: |
           set -euo pipefail
 
@@ -360,7 +360,14 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
+            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
+          else
+            echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
+            exit 1
+          fi
           sh docker/run-docker.sh test
 
   test-gpu:
@@ -383,7 +390,14 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
+            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
+          else
+            echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
+            exit 1
+          fi
           sh docker/run-docker.sh test
 
   test-npu:
@@ -406,14 +420,21 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
+            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
+          else
+            echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
+            exit 1
+          fi
           sh docker/run-docker.sh test
 
   release-cpu:
     name: Release CPU Image
     runs-on: [self-hosted, cpu-runner]
     needs: test-cpu
-    if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || inputs.enable_release == 'true') }}
+    if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
       ENV_TAG: cpu
       DOCKER_IMAGE_TAG: cpu-latest
@@ -441,7 +462,7 @@ jobs:
     name: Release GPU Image
     runs-on: [self-hosted, gpu-runner]
     needs: test-gpu
-    if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || inputs.enable_release == 'true') }}
+    if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
       ENV_TAG: gpu
       DOCKER_IMAGE_TAG: gpu-latest
@@ -469,7 +490,7 @@ jobs:
     name: Release NPU Image
     runs-on: [self-hosted, npu-runner]
     needs: test-npu
-    if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || inputs.enable_release == 'true') }}
+    if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
       ENV_TAG: npu
       DOCKER_IMAGE_TAG: npu-latest
