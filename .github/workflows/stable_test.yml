@@ -25,10 +25,14 @@ name: Stable Test
           - "false"
           - "true"
 
+permissions:
+  contents: read
+  packages: write
+
 env:
   GIT_SUBMODULE_STRATEGY: recursive
   DOCKER_IMAGE_LOCAL: triton-local-build
-  DOCKER_IMAGE: triton-local-build
+  DOCKER_IMAGE: ghcr.io/sota-pnu/lowlevel-api-test
   ENABLE_RELEASE: "false"
 
 jobs:
@@ -442,11 +446,11 @@ jobs:
       - name: Push release image
         shell: bash
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
@@ -470,11 +474,11 @@ jobs:
       - name: Push release image
         shell: bash
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
@@ -498,11 +502,11 @@ jobs:
       - name: Push release image
         shell: bash
         env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
