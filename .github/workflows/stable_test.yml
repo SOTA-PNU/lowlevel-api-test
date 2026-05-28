@@ -452,14 +452,27 @@ jobs:
           set -euo pipefail
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
+          push_image() {
+            local image_tag="$1"
+            local attempt
+            for attempt in 1 2 3; do
+              echo ">>> Pushing ${image_tag} (attempt ${attempt}/3)"
+              if docker push "$image_tag"; then
+                return 0
+              fi
+              sleep $((attempt * 30))
+            done
+            return 1
+          }
+
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
-            docker push "${DOCKER_IMAGE}:main-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:main-${ENV_TAG}"
           fi
 
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
-            docker push "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
           fi
 
   release-gpu:
@@ -480,14 +493,27 @@ jobs:
           set -euo pipefail
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
+          push_image() {
+            local image_tag="$1"
+            local attempt
+            for attempt in 1 2 3; do
+              echo ">>> Pushing ${image_tag} (attempt ${attempt}/3)"
+              if docker push "$image_tag"; then
+                return 0
+              fi
+              sleep $((attempt * 30))
+            done
+            return 1
+          }
+
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
-            docker push "${DOCKER_IMAGE}:main-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:main-${ENV_TAG}"
           fi
 
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
-            docker push "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
           fi
 
   release-npu:
@@ -508,12 +534,25 @@ jobs:
           set -euo pipefail
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
+          push_image() {
+            local image_tag="$1"
+            local attempt
+            for attempt in 1 2 3; do
+              echo ">>> Pushing ${image_tag} (attempt ${attempt}/3)"
+              if docker push "$image_tag"; then
+                return 0
+              fi
+              sleep $((attempt * 30))
+            done
+            return 1
+          }
+
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
-            docker push "${DOCKER_IMAGE}:main-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:main-${ENV_TAG}"
           fi
 
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
-            docker push "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
           fi
