@@ -1,6 +1,6 @@
 # Enhanced Triton Dockerfile with CUDA Version Detection and GPU Architecture Support
 # Automatically detects host CUDA version and builds accordingly
-# Supports both CUDA and CPU-only builds
+# Supports CUDA, CPU-only, and out-of-tree NPU backend builds
 
 # Use Ubuntu 24.04 base image and install CUDA manually
 FROM ubuntu:24.04
@@ -10,6 +10,7 @@ ARG BUILD_MODE=cuda
 ARG CUDA_VERSION=12.8
 ARG CUDA_ARCHITECTURE=sm_120
 ARG PYTORCH_CUDA_VERSION=cu128
+ARG NPU_PIP_PACKAGES=
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -52,7 +53,7 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         rm cuda-keyring_1.1-1_all.deb && \
         rm -rf /var/lib/apt/lists/*; \
     else \
-        echo "Skipping CUDA installation for CPU-only build"; \
+        echo "Skipping CUDA installation for ${BUILD_MODE} build"; \
     fi
 
 # Set CUDA environment variables (only if BUILD_MODE is cuda)
@@ -90,6 +91,19 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
 # Install additional requirements
 RUN /opt/triton-venv/bin/pip install numpy pytest
 
+# Install optional Rebellions/NPU Python packages. Public package names differ by
+# environment, so CI can pass NPU_PIP_PACKAGES or add requirements-npu.txt.
+RUN if [ "$BUILD_MODE" = "npu" ]; then \
+        if [ -n "$NPU_PIP_PACKAGES" ]; then \
+            echo "Installing NPU packages: $NPU_PIP_PACKAGES" && \
+            /opt/triton-venv/bin/pip install $NPU_PIP_PACKAGES; \
+        fi; \
+        if [ -f requirements-npu.txt ]; then \
+            echo "Installing requirements-npu.txt" && \
+            /opt/triton-venv/bin/pip install -r requirements-npu.txt; \
+        fi; \
+    fi
+
 # Install Triton build dependencies
 RUN /opt/triton-venv/bin/pip install -r triton/python/requirements.txt
 
@@ -104,6 +118,10 @@ RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
     echo '    echo "📋 CPU-only build mode detected"' >> /workspace/detect_and_build.sh && \
     echo '    CUDA_ARCH="none"' >> /workspace/detect_and_build.sh && \
     echo '    echo "🏗️  Building Triton for CPU-only execution"' >> /workspace/detect_and_build.sh && \
+    echo 'elif [ "$BUILD_MODE" = "npu" ]; then' >> /workspace/detect_and_build.sh && \
+    echo '    echo "📋 NPU build mode detected"' >> /workspace/detect_and_build.sh && \
+    echo '    CUDA_ARCH="none"' >> /workspace/detect_and_build.sh && \
+    echo '    echo "🏗️  Building Triton with out-of-tree NPU backend support"' >> /workspace/detect_and_build.sh && \
     echo 'else' >> /workspace/detect_and_build.sh && \
     echo '    echo "📋 CUDA build mode detected"' >> /workspace/detect_and_build.sh && \
     echo '    ' >> /workspace/detect_and_build.sh && \
@@ -158,6 +176,8 @@ RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
     echo '    export TRITON_CUDA_ARCHITECTURES="$CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
     echo '    export TORCH_CUDA_ARCH_LIST="$CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
     echo '    echo "🚀 Building Triton with CUDA architecture: $CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
+    echo 'elif [ "$BUILD_MODE" = "npu" ]; then' >> /workspace/detect_and_build.sh && \
+    echo '    echo "🚀 Building Triton for NPU backend execution"' >> /workspace/detect_and_build.sh && \
     echo 'else' >> /workspace/detect_and_build.sh && \
     echo '    echo "🚀 Building Triton for CPU-only execution"' >> /workspace/detect_and_build.sh && \
     echo 'fi' >> /workspace/detect_and_build.sh && \
@@ -186,9 +206,11 @@ RUN BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh
 # Keep --local-triton imports pointed at the built source tree.
 RUN rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton
 
-# Verify the build artifacts are present (only for CUDA builds)
+# Verify the build artifacts/backend registration for the selected build mode.
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         ls -la /opt/triton-src/python/triton/_C/ || echo "Build artifacts verification failed"; \
+    elif [ "$BUILD_MODE" = "npu" ]; then \
+        env -u TRITON_BACKENDS_IN_TREE /opt/triton-venv/bin/python -c "from triton.backends import backends; keys=sorted(backends); npu=[k for k in keys if any(s in k.lower() for s in ('npu','rbln','rebel','rebellions'))]; print('Registered Triton backends:', ', '.join(keys) if keys else 'none'); assert npu, 'No Rebellions/NPU Triton backend is registered in the image'"; \
     else \
         echo "CPU-only build - skipping CUDA artifacts verification"; \
     fi
