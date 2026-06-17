@@ -155,13 +155,13 @@ jobs:
           if command -v nvidia-smi >/dev/null 2>&1; then
             {
               echo "BUILD_MODE=cuda"
-              echo "CUDA_VERSION=12.6"
+              echo "CUDA_VERSION=12.8"
 
               GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
               case "$GPU_NAME" in
                 *"Blackwell"*|*"RTX PRO 6000"*)
                   echo "CUDA_ARCHITECTURE=sm_120"
-                  echo "PYTORCH_CUDA_VERSION=cu124"
+                  echo "PYTORCH_CUDA_VERSION=cu128"
                   ;;
                 *"Hopper"*|*"H100"*)
                   echo "CUDA_ARCHITECTURE=sm_90"
