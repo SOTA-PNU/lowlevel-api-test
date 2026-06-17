@@ -215,7 +215,7 @@ jobs:
           echo ">>> Detecting environment..."
 
           {
-            echo "BUILD_MODE=cpu"
+            echo "BUILD_MODE=npu"
             echo "CUDA_VERSION=none"
             echo "CUDA_ARCHITECTURE=none"
             echo "PYTORCH_CUDA_VERSION=cpu"
@@ -223,7 +223,7 @@ jobs:
 
           cat "$BUILD_ARGS"
           {
-            echo "build_mode=cpu"
+            echo "build_mode=npu"
             echo "cuda_version=none"
             echo "cuda_architecture=none"
             echo "pytorch_cuda_version=cpu"
@@ -329,6 +329,7 @@ jobs:
           CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
           CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
           PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
+          NPU_PIP_PACKAGES: ${{ vars.NPU_PIP_PACKAGES || '' }}
         run: |
           set -euo pipefail
           echo ">>> Building Docker image with host Docker"
@@ -340,6 +341,7 @@ jobs:
             --build-arg CUDA_VERSION="$CUDA_VERSION" \
             --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
             --build-arg PYTORCH_CUDA_VERSION="$PYTORCH_CUDA_VERSION" \
+            --build-arg NPU_PIP_PACKAGES="${NPU_PIP_PACKAGES:-}" \
             .
           docker image prune -f
           docker system df
@@ -432,7 +434,7 @@ jobs:
             echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test
+          sh docker/run-docker.sh test-npu
 
   release-cpu:
     name: Release CPU Image

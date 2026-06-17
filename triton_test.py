@@ -62,10 +62,11 @@ class TestResultInfo:
 # Setup / common helpers
 # ---------------------------------------------------------------------------
 
-def setup_triton_imports(use_local: bool = False):
+def setup_triton_imports(use_local: bool = False, device: str = "auto"):
     global triton, tl, libdevice, extra
 
-    os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
+    if device != "npu":
+        os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 
     if use_local:
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -94,6 +95,18 @@ def setup_triton_imports(use_local: bool = False):
     extra = _extra
 
 
+RUNTIME_DEVICE = "cuda"
+
+
+def _set_runtime_device(device: str) -> None:
+    global RUNTIME_DEVICE
+    RUNTIME_DEVICE = "npu" if device == "npu" else "cuda"
+
+
+def _runtime_device() -> str:
+    return RUNTIME_DEVICE
+
+
 def _require_cuda(device: str):
     if device == "cpu":
         raise RuntimeError("Real Triton execution/perf testing requires CUDA; CPU mode is not supported here.")
@@ -101,8 +114,109 @@ def _require_cuda(device: str):
         raise RuntimeError("CUDA is not available.")
 
 
+def _require_runtime_device(device: str):
+    if device == "npu":
+        if not _torch_device_available("npu"):
+            raise RuntimeError("NPU backend is available, but torch cannot create tensors on device='npu'.")
+        return
+    _require_cuda(device)
+
+
+def _torch_device_available(device: str) -> bool:
+    try:
+        torch.empty(1, device=device)
+        return True
+    except Exception:
+        return False
+
+
+def _sync_device() -> None:
+    if RUNTIME_DEVICE == "cuda":
+        torch.cuda.synchronize()
+        return
+    # NPU runtimes do not expose a common PyTorch synchronize API. Correctness
+    # checks below force completion when tensors are read or compared.
+
+
 def _device_string() -> str:
-    return f"CUDA ({torch.cuda.get_device_name(0)})"
+    if RUNTIME_DEVICE == "cuda":
+        return f"CUDA ({torch.cuda.get_device_name(0)})"
+    npu_mod = getattr(torch, "npu", None)
+    if npu_mod is not None and hasattr(npu_mod, "get_device_name"):
+        try:
+            return f"NPU ({npu_mod.get_device_name(0)})"
+        except Exception:
+            pass
+    return "NPU"
+
+
+NPU_BACKEND_KEYWORDS = ("npu", "rbln", "rebel", "rebellions")
+NPU_PACKAGE_CANDIDATES = (
+    "rbln",
+    "rebel",
+    "rebellions",
+    "rebel_runtime",
+    "rebel_compiler",
+    "optimum.rbln",
+)
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def run_npu_capability_check() -> None:
+    print("\n[NPU] Checking Triton NPU backend capability...")
+    found_packages = [name for name in NPU_PACKAGE_CANDIDATES if _module_available(name)]
+    print(f"Detected NPU-related Python packages: {', '.join(found_packages) if found_packages else 'none'}")
+
+    try:
+        from triton.backends import backends
+    except Exception as e:
+        raise RuntimeError(f"Failed to inspect Triton backends: {e}") from e
+
+    backend_names = sorted(backends.keys())
+    npu_backend_names = [
+        name for name in backend_names
+        if any(keyword in name.lower() for keyword in NPU_BACKEND_KEYWORDS)
+    ]
+    print(f"Registered Triton backends: {', '.join(backend_names) if backend_names else 'none'}")
+    print(f"NPU-like Triton backends: {', '.join(npu_backend_names) if npu_backend_names else 'none'}")
+
+    if not npu_backend_names:
+        raise RuntimeError(
+            "No Rebellions/NPU Triton backend is registered. "
+            "Install or expose the NPU Triton backend in this image before running Triton ops on NPU."
+        )
+
+    active_backends = []
+    inactive_backends = []
+    for name in npu_backend_names:
+        driver = backends[name].driver
+        try:
+            is_active = bool(driver.is_active())
+        except Exception as e:
+            inactive_backends.append(f"{name} ({e})")
+            continue
+        if is_active:
+            active_backends.append(name)
+        else:
+            inactive_backends.append(name)
+
+    print(f"Active NPU Triton backends: {', '.join(active_backends) if active_backends else 'none'}")
+    if inactive_backends:
+        print(f"Inactive NPU Triton backends: {', '.join(inactive_backends)}")
+
+    if not active_backends:
+        raise RuntimeError(
+            "A Rebellions/NPU Triton backend appears to be installed, but no NPU backend is active. "
+            "Check that the NPU device, driver, and container runtime are visible inside Docker."
+        )
+
+    print("NPU Triton backend capability check passed.")
 
 
 def _load_temp_module(source, prefix: str, module_name: str):
@@ -156,17 +270,23 @@ def _do_bench(fn, warmup: int, rep: int) -> float:
     try:
         return float(triton.testing.do_bench(fn, warmup=warmup, rep=rep))
     except Exception:
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
         for _ in range(warmup):
             fn()
-        torch.cuda.synchronize()
-        start.record()
+        _sync_device()
+        if RUNTIME_DEVICE == "cuda":
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(rep):
+                fn()
+            end.record()
+            _sync_device()
+            return start.elapsed_time(end) / max(rep, 1)
+        start_t = time.perf_counter()
         for _ in range(rep):
             fn()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / max(rep, 1)
+        _sync_device()
+        return (time.perf_counter() - start_t) * 1000.0 / max(rep, 1)
 
 
 def _make_launch(kernel, grid_spec, *kernel_args, **meta):
@@ -397,16 +517,16 @@ def collect_tl_symbols():
 
 
 def test_tl_only(args):
-    _require_cuda(args.device)
+    _require_runtime_device(args.device)
 
     results = {}
     n = args.size
     B = args.block
     grid = (triton.cdiv(n, B),)
-    x_fp = torch.randn(n, device="cuda")
-    y_fp = torch.randn(n, device="cuda")
-    x_int = torch.randint(1, 1000, (n,), device="cuda", dtype=torch.int32)
-    y_int = torch.randint(1, 1000, (n,), device="cuda", dtype=torch.int32)
+    x_fp = torch.randn(n, device=_runtime_device())
+    y_fp = torch.randn(n, device=_runtime_device())
+    x_int = torch.randint(1, 1000, (n,), device=_runtime_device(), dtype=torch.int32)
+    y_int = torch.randint(1, 1000, (n,), device=_runtime_device(), dtype=torch.int32)
     symbols = collect_tl_symbols()
 
     print(f"\nDetected tl symbols = {len(symbols)}")
@@ -444,7 +564,7 @@ def test_tl_only(args):
         return tensor.reshape(grid[0], B)
 
     def mask_blocks():
-        return (torch.arange(grid[0] * B, device="cuda").reshape(grid[0], B) < n)
+        return (torch.arange(grid[0] * B, device=_runtime_device()).reshape(grid[0], B) < n)
 
     def valid_prefix(actual, expected, detail, rtol=1e-4, atol=1e-4):
         actual_prefix = actual[:expected.numel()]
@@ -873,7 +993,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(unary_kernel, grid, x_fp, out, n, BLOCK=B, OP=fn)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 ok, detail = valid_prefix(out, expected_unary(name, x_fp), f"validated-unary:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
@@ -883,17 +1003,17 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(binary_kernel, grid, x_fp, y_fp, out, n, BLOCK=B, OP=fn)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 ok, detail = valid_prefix(out, expected_binary(name, x_fp, y_fp), f"validated-binary:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
 
             # --- float reduce ---
             elif name in TL_REDUCE_FLOAT:
-                out = torch.empty((grid[0],), device="cuda", dtype=x_fp.dtype)
+                out = torch.empty((grid[0],), device=_runtime_device(), dtype=x_fp.dtype)
                 launch = _make_launch(reduce_float_kernel, grid, x_fp, out, n, BLOCK=B, OP=fn)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 xb = blocks(x_fp)
                 mb = mask_blocks()
                 xb_masked = torch.where(mb, xb, torch.zeros_like(xb))
@@ -909,12 +1029,12 @@ def test_tl_only(args):
 
             # --- int reduce (xor_sum) ---
             elif name in TL_REDUCE_INT:
-                out = torch.empty((grid[0],), device="cuda", dtype=torch.int32)
+                out = torch.empty((grid[0],), device=_runtime_device(), dtype=torch.int32)
                 launch = _make_launch(reduce_int_kernel, grid, x_int, out, n, BLOCK=B, OP=fn)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 xb = torch.where(mask_blocks(), blocks(x_int), torch.zeros_like(blocks(x_int)))
-                exp = torch.zeros((grid[0],), device="cuda", dtype=torch.int32)
+                exp = torch.zeros((grid[0],), device=_runtime_device(), dtype=torch.int32)
                 for i in range(B):
                     exp = torch.bitwise_xor(exp, xb[:, i])
                 ok, detail = valid_prefix(out, exp, f"validated-reduce-int:{name}")
@@ -923,10 +1043,10 @@ def test_tl_only(args):
 
             # --- argmax / argmin ---
             elif name in TL_REDUCE_ARGFLOAT:
-                out = torch.empty((grid[0],), device="cuda", dtype=torch.int32)
+                out = torch.empty((grid[0],), device=_runtime_device(), dtype=torch.int32)
                 launch = _make_launch(reduce_arg_kernel, grid, x_fp, out, n, BLOCK=B, OP=fn)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 xb = torch.where(mask_blocks(), blocks(x_fp), torch.zeros_like(blocks(x_fp)))
                 exp = torch.argmax(xb, dim=1).to(torch.int32) if name == "argmax" else torch.argmin(xb, dim=1).to(torch.int32)
                 ok, detail = valid_prefix(out, exp, f"validated-reduce-arg:{name}")
@@ -935,10 +1055,10 @@ def test_tl_only(args):
 
             # --- reduce_or ---
             elif name in TL_REDUCE_BOOL:
-                out = torch.empty((grid[0],), device="cuda", dtype=torch.int8)
+                out = torch.empty((grid[0],), device=_runtime_device(), dtype=torch.int8)
                 launch = _make_launch(reduce_bool_kernel, grid, x_int, out, n, BLOCK=B)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 exp = (torch.where(mask_blocks(), blocks(x_int), torch.zeros_like(blocks(x_int))) > 0).any(dim=1).to(torch.int8)
                 ok, detail = valid_prefix(out, exp, f"validated-reduce-bool:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "bool", "exec+perf",
@@ -949,7 +1069,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(mem_kernel, grid, x_fp, out, n, BLOCK=B)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 ok, detail = valid_prefix(out, x_fp, f"validated-memory:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
@@ -959,7 +1079,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(block_ptr_kernel, grid, x_fp, out, n, BLOCK=B)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 ok, detail = valid_prefix(out, x_fp, f"validated-block-ptr:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
@@ -975,7 +1095,7 @@ def test_tl_only(args):
                 mode = TL_MISC_ELEMENTWISE[name]
                 launch = _make_launch(misc_elementwise_kernel, grid, x_fp, y_fp, out, n, BLOCK=B, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 if name == "cast":
                     exp = x_fp
                 elif name == "clamp":
@@ -994,7 +1114,7 @@ def test_tl_only(args):
                 mode = TL_INT_ELEMENTWISE[name]
                 launch = _make_launch(int_elementwise_kernel, grid, x_int, y_int, out, n, BLOCK=B, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 exp = ((x_int.to(torch.int64) * y_int.to(torch.int64)) >> 32).to(torch.int32)
                 ok, detail = valid_prefix(out, exp, f"validated-int-elementwise:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "int32", "exec+perf",
@@ -1006,15 +1126,15 @@ def test_tl_only(args):
                 mode = TL_CREATION_INDEX[name]
                 launch = _make_launch(creation_index_kernel, grid, x_fp, out, n, BLOCK=B, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
-                base = torch.arange(grid[0] * B, device="cuda", dtype=torch.float32).reshape(grid[0], B)
-                local = torch.arange(B, device="cuda", dtype=torch.float32).repeat(grid[0], 1).reshape(-1)[:n]
+                _sync_device()
+                base = torch.arange(grid[0] * B, device=_runtime_device(), dtype=torch.float32).reshape(grid[0], B)
+                local = torch.arange(B, device=_runtime_device(), dtype=torch.float32).repeat(grid[0], 1).reshape(-1)[:n]
                 if name == "arange":
                     exp = local
                 elif name == "full":
-                    exp = torch.full((n,), 3.0, device="cuda")
+                    exp = torch.full((n,), 3.0, device=_runtime_device())
                 elif name in {"zeros", "zeros_like"}:
-                    exp = torch.zeros(n, device="cuda")
+                    exp = torch.zeros(n, device=_runtime_device())
                 else:
                     exp = torch.div(local + 1, 2, rounding_mode="floor").ceil()
                     exp = torch.div(local + 2, 2, rounding_mode="floor")
@@ -1027,7 +1147,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(hint_kernel, grid, x_fp, out, n, BLOCK=B, MODE=TL_HINTS[name])
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 ok, detail = valid_prefix(out, x_fp, f"validated-compiler-hint:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
@@ -1037,11 +1157,11 @@ def test_tl_only(args):
                 out = torch.empty_like(x_int)
                 launch = _make_launch(program_kernel, grid, out, n, BLOCK=B, MODE=TL_PROGRAM[name])
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 if name == "program_id":
-                    exp = torch.arange(grid[0], device="cuda", dtype=torch.int32).repeat_interleave(B)[:n]
+                    exp = torch.arange(grid[0], device=_runtime_device(), dtype=torch.int32).repeat_interleave(B)[:n]
                 else:
-                    exp = torch.full((n,), grid[0], device="cuda", dtype=torch.int32)
+                    exp = torch.full((n,), grid[0], device=_runtime_device(), dtype=torch.int32)
                 ok, detail = valid_prefix(out, exp, f"validated-program-grid:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "int32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
@@ -1051,8 +1171,8 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(control_kernel, grid, out, n, BLOCK=B, MODE=TL_CONTROL[name])
                 launch()
-                torch.cuda.synchronize()
-                ok, detail = valid_prefix(out, torch.zeros(n, device="cuda"), f"validated-control:{name}")
+                _sync_device()
+                ok, detail = valid_prefix(out, torch.zeros(n, device=_runtime_device()), f"validated-control:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
 
@@ -1061,7 +1181,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(random_kernel, grid, out, n, BLOCK=B, MODE=TL_RANDOM_MODES[name])
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 sample = out[:n]
                 if name in {"rand", "rand4x", "uint_to_uniform_float"}:
                     ok = bool(torch.isfinite(sample).all() and (sample >= 0).all() and (sample < 4 if name == "rand4x" else sample < 1).all())
@@ -1077,7 +1197,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(scan_reduce_kernel, grid, x_fp, out, n, BLOCK=B, MODE=TL_SCAN_REDUCE[name])
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 xb = torch.where(mask_blocks(), blocks(x_fp), torch.ones_like(blocks(x_fp)))
                 if name in {"cumsum", "associative_scan"}:
                     exp = torch.cumsum(xb, dim=1).reshape(-1)[:n]
@@ -1094,7 +1214,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(ordering_kernel, grid, x_fp, out, n, BLOCK=B, MODE=TL_ORDERING[name])
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 xb = torch.where(mask_blocks(), blocks(x_fp), torch.full_like(blocks(x_fp), -float("inf")))
                 if name == "softmax":
                     exp = torch.softmax(xb, dim=1).reshape(-1)[:n]
@@ -1106,11 +1226,11 @@ def test_tl_only(args):
 
             # --- layout misc ops ---
             elif name in TL_LAYOUT_MISC:
-                out = torch.empty(n * 2, device="cuda", dtype=torch.float32) if name == "interleave" else torch.empty_like(x_fp)
+                out = torch.empty(n * 2, device=_runtime_device(), dtype=torch.float32) if name == "interleave" else torch.empty_like(x_fp)
                 mode = TL_LAYOUT_MISC[name]
                 launch = _make_launch(layout_misc_kernel, grid, x_fp, y_fp, out, n, BLOCK=B, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 if name == "flip":
                     exp = torch.flip(blocks(x_fp), dims=[1]).reshape(-1)[:n]
                     ok, detail = valid_prefix(out, exp, f"validated-layout:{name}")
@@ -1123,12 +1243,12 @@ def test_tl_only(args):
             # --- matrix ops ---
             elif name in TL_MATRIX:
                 M, N, K = 16, 16, 16
-                a = torch.randn(M * K, device="cuda")
-                b = torch.randn(K * N, device="cuda")
-                out = torch.empty(M * N, device="cuda")
+                a = torch.randn(M * K, device=_runtime_device())
+                b = torch.randn(K * N, device=_runtime_device())
+                out = torch.empty(M * N, device=_runtime_device())
                 launch = _make_launch(matrix_kernel, (1,), a, b, out, M=M, N=N, K=K, MODE=TL_MATRIX[name])
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 exp = a.reshape(M, K) @ b.reshape(K, N)
                 ok, detail = valid_prefix(out, exp.reshape(-1), f"validated-matrix:{name}", rtol=1e-2, atol=1e-2)
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
@@ -1139,11 +1259,11 @@ def test_tl_only(args):
                 swizzle_size_i, swizzle_size_j, swizzle_size_g = 64, 16, 4
                 swizzle_n = swizzle_size_i * swizzle_size_j
                 swizzle_grid = (triton.cdiv(swizzle_n, B),)
-                out = torch.empty(swizzle_n, device="cuda", dtype=torch.float32)
+                out = torch.empty(swizzle_n, device=_runtime_device(), dtype=torch.float32)
                 launch = _make_launch(swizzle_kernel, swizzle_grid, out, swizzle_n, BLOCK=B, MODE=TL_SWIZZLE[name])
                 launch()
-                torch.cuda.synchronize()
-                offs_cpu = torch.arange(swizzle_n, device="cuda")
+                _sync_device()
+                offs_cpu = torch.arange(swizzle_n, device=_runtime_device())
                 i = offs_cpu // swizzle_size_j
                 j = offs_cpu % swizzle_size_j
                 ij = i * swizzle_size_j + j
@@ -1162,7 +1282,7 @@ def test_tl_only(args):
 
             # --- atomic ops ---
             elif name in TL_ATOMIC:
-                buf = torch.zeros(n, device="cuda", dtype=torch.int32)
+                buf = torch.zeros(n, device=_runtime_device(), dtype=torch.int32)
                 out = torch.empty_like(buf)
                 atomic_mode = {
                     "atomic_add": 0, "atomic_max": 1, "atomic_min": 2,
@@ -1171,9 +1291,9 @@ def test_tl_only(args):
                 }[name]
                 launch = _make_launch(atomic_kernel, grid, buf, out, n, BLOCK=B, MODE=atomic_mode)
                 launch()
-                torch.cuda.synchronize()
-                vals = ((torch.arange(n, device="cuda", dtype=torch.int32) & 7) + 1)
-                expected_old = torch.zeros(n, device="cuda", dtype=torch.int32)
+                _sync_device()
+                vals = ((torch.arange(n, device=_runtime_device(), dtype=torch.int32) & 7) + 1)
+                expected_old = torch.zeros(n, device=_runtime_device(), dtype=torch.int32)
                 expected_buf = vals if name not in {"atomic_and", "atomic_min"} else torch.zeros_like(vals)
                 ok_old, old_abs, old_rel = _compare_tensors(out[:n], expected_old)
                 ok_buf, buf_abs, buf_rel = _compare_tensors(buf[:n], expected_buf)
@@ -1187,7 +1307,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(broadcast_kernel, grid, x_fp, out, n, BLOCK=B)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 exp = torch.where(mask_blocks(), blocks(x_fp), torch.zeros_like(blocks(x_fp))).sum(dim=1).repeat_interleave(B)[:n]
                 ok, detail = valid_prefix(out, exp, "validated-shape-broadcast")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
@@ -1200,7 +1320,7 @@ def test_tl_only(args):
                 mode = SHAPE_1D_MODES[name]
                 launch = _make_launch(shape_1d_kernel, grid, x_fp, out, n, BLOCK=B, ROWS=ROWS, COLS=COLS, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 ok, detail = valid_prefix(out, x_fp, f"validated-shape-1d:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
                                    t0, ok, detail, launch, args.warmup, args.rep)
@@ -1209,12 +1329,12 @@ def test_tl_only(args):
             elif name in SHAPE_2D_MODES:
                 ROWS, COLS = 16, B // 16
                 size2d = ROWS * COLS
-                x2d = torch.randn(size2d, device="cuda")
-                out2d = torch.empty(size2d, device="cuda")
+                x2d = torch.randn(size2d, device=_runtime_device())
+                out2d = torch.empty(size2d, device=_runtime_device())
                 mode = SHAPE_2D_MODES[name]
                 launch = _make_launch(shape_2d_kernel, (1,), x2d, out2d, ROWS=ROWS, COLS=COLS, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 exp = x2d.reshape(ROWS, COLS).t().contiguous().reshape(-1)
                 ok, detail = valid_prefix(out2d, exp, f"validated-shape-2d:{name}")
                 _record_validation(results, f"tl.{name}", "tl", "fp32", "exec+perf",
@@ -1226,7 +1346,7 @@ def test_tl_only(args):
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(cat_kernel, grid, x_fp, out, n, BLOCK=B, HALF=HALF)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 actual_sorted = torch.sort(blocks(out[:n]), dim=1).values
                 expected_sorted = torch.sort(blocks(x_fp), dim=1).values
                 ok, max_abs, max_rel = _compare_tensors(actual_sorted, expected_sorted)
@@ -1237,11 +1357,11 @@ def test_tl_only(args):
             # --- join / split shape ops ---
             elif name in SHAPE_JOIN_SPLIT_MODES:
                 HALF = B // 2
-                out = torch.empty(n * 2, device="cuda", dtype=torch.float32) if name == "join" else torch.empty_like(x_fp)
+                out = torch.empty(n * 2, device=_runtime_device(), dtype=torch.float32) if name == "join" else torch.empty_like(x_fp)
                 mode = SHAPE_JOIN_SPLIT_MODES[name]
                 launch = _make_launch(join_split_kernel, grid, x_fp, y_fp, out, n, BLOCK=B, HALF=HALF, MODE=mode)
                 launch()
-                torch.cuda.synchronize()
+                _sync_device()
                 if name == "join":
                     exp = torch.stack([x_fp, y_fp], dim=1).reshape(-1)
                     ok, detail = valid_prefix(out, exp, f"validated-shape-join-split:{name}")
@@ -1498,7 +1618,7 @@ def _other_literal(t: str) -> str:
 
 def _make_lib_tensor(fn: str, t: str, n: int, arg_idx: int) -> torch.Tensor:
     dt = _torch_dtype_from_tag(t)
-    dev = "cuda"
+    dev = _runtime_device()
     if fn in {"jn", "yn"} and arg_idx == 0:
         return (torch.arange(n, device=dev, dtype=torch.int32) % 6).to(dt)
     if fn in {"ldexp", "scalbn"} and arg_idx == 1:
@@ -1789,11 +1909,11 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
         try:
             module, temp_path = _make_lib_smoke_kernel_module(fn, sig)
             tensors = [_make_lib_tensor(fn, t, args.size, i) for i, t in enumerate(sig.inputs)]
-            out = torch.empty((args.size,), device="cuda", dtype=_torch_dtype_from_tag(sig.output))
+            out = torch.empty((args.size,), device=_runtime_device(), dtype=_torch_dtype_from_tag(sig.output))
 
             launch = _make_launch(module._k, grid, *tensors, out, args.size, args.block)
             launch()
-            torch.cuda.synchronize()
+            _sync_device()
             expected, reference, rtol, atol = _libdevice_reference(fn, tensors, sig)
             ok = True
             detail = f"validated-smoke:{fn}; ref={reference}; max_abs=NA; max_rel=NA"
@@ -1801,7 +1921,7 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
                 ok, max_abs, max_rel = _compare_tensors(out, expected, rtol=rtol, atol=atol)
                 detail = _format_error_detail(f"validated-libdevice:{fn}", max_abs, max_rel, reference=reference)
             ms = _do_bench(launch, args.warmup, args.rep)
-            torch.cuda.synchronize()
+            _sync_device()
             gbps = _bytes_moved(tensors, out, args.size) / (ms * 1e-3) / 1e9 if ms and ms > 0 else 0.0
             sample = out[:1].detach().cpu().flatten()[0].item()
             detail = f"{detail}; sample={sample}"
@@ -1835,7 +1955,7 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
 
 
 def test_libdevice_only(args) -> Dict[str, TestResultInfo]:
-    _require_cuda(args.device)
+    _require_runtime_device(args.device)
     results: Dict[str, TestResultInfo] = {}
     funcs = _exported_libdevice_functions()
     if args.only:
@@ -1926,18 +2046,17 @@ def _make_extra_cuda_kernel_module(functions: List[str]):
 
 def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
     t0 = time.time()
-    name = f"cuda.{fn}"
     try:
         k = getattr(km, f"_cuda_{fn}_k")
         if fn in EXTRA_CUDA_FLOAT8_CONVERT:
             n = args.size
             grid = (triton.cdiv(n, args.block),)
-            x = torch.linspace(-1.75, 1.75, n, device="cuda", dtype=torch.float32)
+            x = torch.linspace(-1.75, 1.75, n, device=_runtime_device(), dtype=torch.float32)
             out = torch.empty_like(x)
 
             launch = _make_launch(k, grid, x, out, n, args.block, num_warps=4)
             launch()
-            torch.cuda.synchronize()
+            _sync_device()
             sample = out[:n]
             ok = bool(torch.isfinite(sample).all() and (sample.abs() <= 1.7501).all())
             max_abs = float(torch.max(torch.abs(sample - x.clamp(-1.75, 1.75))).item())
@@ -1946,11 +2065,11 @@ def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
             gbps = _gbps(n, torch.float32, 1, 1, ms) if ok and ms else None
             return TestResultInfo(TestResult.PASS if ok else TestResult.FAIL, time.time() - t0, "cuda", "fp32", "exec+perf", ms, gbps, detail, _device_string())
 
-        out = torch.empty(1, device="cuda", dtype=torch.int64)
+        out = torch.empty(1, device=_runtime_device(), dtype=torch.int64)
 
         launch = _make_launch(k, (1,), out, num_warps=4)
         launch()
-        torch.cuda.synchronize()
+        _sync_device()
         val = int(out.item())
         if fn == "num_warps":
             ok = val == 4
@@ -1971,7 +2090,7 @@ def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
 
 
 def test_extra_only(args) -> Dict[str, TestResultInfo]:
-    _require_cuda(args.device)
+    _require_runtime_device(args.device)
     results: Dict[str, TestResultInfo] = {}
 
     avail = _extra_cuda_callables()
@@ -2129,7 +2248,7 @@ Examples:
 """,
     )
     parser.add_argument("--module", "-m", choices=["tl", "triton.language", "libdevice", "extra", "all"], default="all")
-    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("--device", choices=["auto", "cuda", "cpu", "npu"], default="auto")
     parser.add_argument("--dtype", choices=["fp32", "fp64", "int32", "all"], default="fp32",
                         help="Kept for compatibility. libdevice all-wrapper smoke mode chooses signatures automatically; tl uses fp32; extra uses int64 smoke outputs.")
     parser.add_argument("--only", type=str, default="",
@@ -2144,7 +2263,8 @@ Examples:
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
 
-    setup_triton_imports(args.local_triton)
+    setup_triton_imports(args.local_triton, args.device)
+    _set_runtime_device(args.device)
 
     if args.list:
         print("Available real execution modules:")
@@ -2154,9 +2274,18 @@ Examples:
         print("  all                  : run all of the above")
         return
 
-    _require_cuda(args.device)
+    if args.device == "cpu":
+        print("CUDA is not available in CPU mode.")
+        print("Real Triton execution tests require a CUDA-capable GPU. Skipping tests on this runner.")
+        return
+
+    if args.device == "npu":
+        run_npu_capability_check()
+    else:
+        _require_cuda(args.device)
+
     print(f"Triton: {getattr(triton, '__version__', 'unknown')}")
-    print(f"Device: {torch.cuda.get_device_name(0)}")
+    print(f"Device: {_device_string()}")
 
     start = time.time()
     if args.module in ["tl", "triton.language"]:

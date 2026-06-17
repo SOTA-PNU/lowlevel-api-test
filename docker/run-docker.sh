@@ -159,10 +159,34 @@ run_test() {
     
     echo ">>> Creating temporary container: $CONTAINER_NAME"
     
-    # Check if NVIDIA runtime is available
-    if docker info | grep -q "nvidia"; then
+    if [ "$device" = "npu" ] || [ "${DOCKER_IMAGE_TAG:-}" = "npu-latest" ]; then
+        echo "🧠 Using NPU container runtime access..."
+
+        # NPU device nodes and vendor runtime libraries are environment-specific.
+        # --privileged lets the self-hosted NPU runner expose its device stack to
+        # the container; NPU_DOCKER_ARGS can add site-specific mounts if needed.
+        docker run -d --name "$CONTAINER_NAME" \
+            --privileged \
+            --ipc=host \
+            ${NPU_DOCKER_ARGS:-} \
+            -w /workspace \
+            -e PYTHONPATH="" \
+            triton-local-build:latest \
+            sleep 300
+
+        echo ">>> Copying triton_test.py to container..."
+        docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
+
+        echo ">>> Running tests..."
+        docker exec "$CONTAINER_NAME" \
+            env -u TRITON_BACKENDS_IN_TREE \
+            /opt/triton-venv/bin/python triton_test.py --local-triton --device npu
+
+    # CPU images should skip CUDA-only execution tests. Other images keep
+    # the existing NVIDIA runtime detection behavior.
+    elif [ "$device" != "cpu" ] && [ "${DOCKER_IMAGE_TAG:-}" != "cpu-latest" ] && docker info | grep -q "nvidia"; then
         echo "🚀 Using NVIDIA runtime with CUDA..."
-        
+
         # Start container in background
         docker run -d --name "$CONTAINER_NAME" \
             --runtime=nvidia \
@@ -172,19 +196,19 @@ run_test() {
             -e PYTHONPATH="" \
             triton-local-build:latest \
             sleep 300
-        
+
         # Copy triton_test.py into container
         echo ">>> Copying triton_test.py to container..."
         docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
-        
+
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             /opt/triton-venv/bin/python triton_test.py --local-triton --device cuda
-        
+
     else
         echo "🖥️  NVIDIA runtime not available, running without GPU support..."
-        
+
         # Start container in background
         docker run -d --name "$CONTAINER_NAME" \
             -w /workspace \
@@ -192,17 +216,17 @@ run_test() {
             -e PYTHONPATH="" \
             triton-local-build:latest \
             sleep 300
-        
+
         # Copy triton_test.py into container
         echo ">>> Copying triton_test.py to container..."
         docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
-        
+
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
     fi
-    
+
     # Cleanup will be done automatically by trap on function exit
 }
 
@@ -216,6 +240,12 @@ run_test_cpu() {
 run_test_cuda() {
     echo "🚀 Running CUDA tests..."
     run_test "cuda"
+}
+
+# Run NPU tests
+run_test_npu() {
+    echo "🧠 Running NPU tests..."
+    run_test "npu"
 }
 
 # Run detailed tests
@@ -352,6 +382,10 @@ main() {
         "test-cuda")
             check_image
             run_test_cuda
+            ;;
+        "test-npu")
+            check_image
+            run_test_npu
             ;;
         "test-detailed")
             check_image
