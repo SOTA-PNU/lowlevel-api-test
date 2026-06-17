@@ -7,9 +7,9 @@ FROM ubuntu:24.04
 
 # Build arguments for CUDA version detection (must be after FROM)
 ARG BUILD_MODE=cuda
-ARG CUDA_VERSION=12.6
+ARG CUDA_VERSION=12.8
 ARG CUDA_ARCHITECTURE=sm_120
-ARG PYTORCH_CUDA_VERSION=cu121
+ARG PYTORCH_CUDA_VERSION=cu128
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -47,7 +47,8 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
         dpkg -i cuda-keyring_1.1-1_all.deb && \
         apt-get update && \
-        apt-get install -y cuda-toolkit-12-6 && \
+        CUDA_PACKAGE_VERSION=$(echo "$CUDA_VERSION" | tr . -) && \
+        apt-get install -y "cuda-toolkit-${CUDA_PACKAGE_VERSION}" && \
         rm cuda-keyring_1.1-1_all.deb && \
         rm -rf /var/lib/apt/lists/*; \
     else \
@@ -79,9 +80,8 @@ RUN /opt/triton-venv/bin/pip install --upgrade pip setuptools wheel
 
 # Install PyTorch with appropriate CUDA support based on build mode
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
-        /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --no-deps && \
-        /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath && \
-        /opt/triton-venv/bin/pip install nvidia-cublas-cu12==12.1.3.1 nvidia-cuda-cupti-cu12==12.1.105 nvidia-cuda-nvrtc-cu12==12.1.105 nvidia-cuda-runtime-cu12==12.1.105 nvidia-cudnn-cu12==9.1.0.70 nvidia-cufft-cu12==11.0.2.54 nvidia-curand-cu12==10.3.2.106 nvidia-cusolver-cu12==11.4.5.107 nvidia-cusparse-cu12==12.1.0.106 nvidia-nccl-cu12==2.21.5 nvidia-nvtx-cu12==12.1.105 pillow; \
+        /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA_VERSION}" && \
+        /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath pillow; \
     else \
         /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-deps && \
         /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath pillow; \

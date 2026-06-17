@@ -35,9 +35,9 @@ if [ "$CUDA_AVAILABLE" = true ]; then
     # Detect host CUDA version
     CUDA_VERSION=$(nvidia-smi | grep -oP 'CUDA Version: \K\d+\.\d+' | head -1)
     echo "📋 Host CUDA version: $CUDA_VERSION"
-    # Use CUDA 12.6 for Ubuntu 24.04 compatibility
-    CUDA_VERSION="12.6"
-    echo "📋 Using CUDA toolkit version: $CUDA_VERSION (Ubuntu 24.04 compatible)"
+    # Use CUDA 12.8 so Blackwell/sm_120 builds get a compatible toolkit.
+    CUDA_VERSION="12.8"
+    echo "📋 Using CUDA toolkit version: $CUDA_VERSION (Blackwell-compatible)"
 else
     BUILD_MODE="cpu"
     CUDA_VERSION="none"
@@ -54,7 +54,7 @@ if [ "$BUILD_MODE" = "cuda" ]; then
     case "$GPU_NAME" in
         *"Blackwell"*|*"RTX PRO 6000"*)
             CUDA_ARCH="sm_120"
-            PYTORCH_CUDA_VERSION="cu124"  # Use latest PyTorch for Blackwell
+            PYTORCH_CUDA_VERSION="cu128"  # Use a Blackwell-capable PyTorch build
             echo "🏗️  Detected Blackwell architecture: $CUDA_ARCH"
             ;;
         *"Hopper"*|*"H100"*)
