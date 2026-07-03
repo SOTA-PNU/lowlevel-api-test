@@ -77,7 +77,7 @@ jobs:
           changed_files="$(git diff --name-only "$BEFORE" "$SHA" || true)"
           echo "$changed_files"
 
-          if echo "$changed_files" | grep -Eq '^(docker/Dockerfile|triton($|/)|\.gitmodules|requirements\.txt|setup\.py)$'; then
+          if echo "$changed_files" | grep -Eq '^(\.github/workflows/stable_test\.yml|docker/Dockerfile|triton($|/)|\.gitmodules|requirements(-npu)?\.txt|setup\.py)$'; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_build=false" >> "$GITHUB_OUTPUT"
@@ -428,10 +428,8 @@ jobs:
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
           if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
-            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
           else
-            echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
+            echo "::error::Missing NPU image ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Refusing to run NPU tests with the generic latest image. Re-run this workflow with force_build=true."
             exit 1
           fi
           sh docker/run-docker.sh test-npu
