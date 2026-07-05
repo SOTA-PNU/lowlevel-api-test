@@ -210,7 +210,7 @@ RUN rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         ls -la /opt/triton-src/python/triton/_C/ || echo "Build artifacts verification failed"; \
     elif [ "$BUILD_MODE" = "npu" ]; then \
-        env -u TRITON_BACKENDS_IN_TREE /opt/triton-venv/bin/python -c "from triton.backends import backends; keys=sorted(backends); npu=[k for k in keys if any(s in k.lower() for s in ('npu','rbln','rebel','rebellions'))]; print('Registered Triton backends:', ', '.join(keys) if keys else 'none'); assert npu, 'No Rebellions/NPU Triton backend is registered in the image'"; \
+        env -u TRITON_BACKENDS_IN_TREE /opt/triton-venv/bin/python -c "import triton; from triton.backends import backends; keys=sorted(backends); npu=[k for k in keys if any(s in k.lower() for s in ('npu','rbln','rebel','rebellions'))]; print('Registered Triton backends:', ', '.join(keys) if keys else 'none'); assert npu, 'No Rebellions/NPU Triton backend is registered in the image'"; \
     else \
         echo "CPU-only build - skipping CUDA artifacts verification"; \
     fi
