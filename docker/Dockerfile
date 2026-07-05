@@ -66,32 +66,34 @@ WORKDIR /workspace
 COPY . /workspace/
 
 # Initialize and update git submodules
-RUN git submodule update --init --recursive
+RUN git submodule update --init --recursive && \
+    mv /workspace/triton /opt/triton-src && \
+    ln -s /opt/triton-src /workspace/trito
 
 # Copy Triton source to a separate location to avoid mount conflicts
-RUN cp -r /workspace/triton /opt/triton-src
+# RUN cp -r /workspace/triton /opt/triton-src
 
 # Create virtual environment in /opt to avoid conflicts with host venv
 RUN python3 -m venv /opt/triton-venv
 
 # Upgrade pip and install basic requirements
-RUN /opt/triton-venv/bin/pip install --upgrade pip setuptools wheel
+RUN /opt/triton-venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Install PyTorch with appropriate CUDA support based on build mode
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
-        /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --no-deps && \
-        /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath && \
-        /opt/triton-venv/bin/pip install nvidia-cublas-cu12==12.1.3.1 nvidia-cuda-cupti-cu12==12.1.105 nvidia-cuda-nvrtc-cu12==12.1.105 nvidia-cuda-runtime-cu12==12.1.105 nvidia-cudnn-cu12==9.1.0.70 nvidia-cufft-cu12==11.0.2.54 nvidia-curand-cu12==10.3.2.106 nvidia-cusolver-cu12==11.4.5.107 nvidia-cusparse-cu12==12.1.0.106 nvidia-nccl-cu12==2.21.5 nvidia-nvtx-cu12==12.1.105 pillow; \
+        /opt/triton-venv/bin/pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --no-deps && \
+        /opt/triton-venv/bin/pip install --no-cache-dir filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath && \
+        /opt/triton-venv/bin/pip install --no-cache-dir nvidia-cublas-cu12==12.1.3.1 nvidia-cuda-cupti-cu12==12.1.105 nvidia-cuda-nvrtc-cu12==12.1.105 nvidia-cuda-runtime-cu12==12.1.105 nvidia-cudnn-cu12==9.1.0.70 nvidia-cufft-cu12==11.0.2.54 nvidia-curand-cu12==10.3.2.106 nvidia-cusolver-cu12==11.4.5.107 nvidia-cusparse-cu12==12.1.0.106 nvidia-nccl-cu12==2.21.5 nvidia-nvtx-cu12==12.1.105 pillow; \
     else \
-        /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-deps && \
-        /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath pillow; \
+        /opt/triton-venv/bin/pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-deps && \
+        /opt/triton-venv/bin/pip install --no-cache-dir filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath pillow; \
     fi
 
 # Install additional requirements
-RUN /opt/triton-venv/bin/pip install numpy pytest
+RUN /opt/triton-venv/bin/pip install --no-cache-dir numpy pytest
 
 # Install Triton build dependencies
-RUN /opt/triton-venv/bin/pip install -r triton/python/requirements.txt
+RUN /opt/triton-venv/bin/pip install --no-cache-dir -r triton/python/requirements.txt
 
 # Create a script to detect GPU architecture and build Triton accordingly
 RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
@@ -172,6 +174,8 @@ RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
     echo '# Build extensions with proper architecture' >> /workspace/detect_and_build.sh && \
     echo '/opt/triton-venv/bin/python setup.py build_ext --inplace' >> /workspace/detect_and_build.sh && \
     echo '' >> /workspace/detect_and_build.sh && \
+    echo 'echo "🧹 Cleaning up build artifacts..."' >> /workspace/detect_and_build.sh && \
+    echo 'rm -rf build/ .eggs/ triton.egg-info/' >> /workspace/detect_and_build.sh && \
     echo 'echo "✅ Triton built successfully from source"' >> /workspace/detect_and_build.sh && \
     echo '' >> /workspace/detect_and_build.sh && \
     echo '# Verify installation' >> /workspace/detect_and_build.sh && \
@@ -184,7 +188,7 @@ RUN chmod +x /workspace/detect_and_build.sh
 RUN BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh
 
 # Keep --local-triton imports pointed at the built source tree.
-RUN rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton
+# RUN rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton
 
 # Verify the build artifacts are present (only for CUDA builds)
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
