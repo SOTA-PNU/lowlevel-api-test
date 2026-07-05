@@ -93,7 +93,7 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
 RUN /opt/triton-venv/bin/pip install --no-cache-dir numpy pytest
 
 # Install Triton build dependencies
-RUN /opt/triton-venv/bin/pip install --no-cache-dir -r triton/python/requirements.txt
+RUN /opt/triton-venv/bin/pip install --no-cache-dir -r /opt/triton-src/python/requirements.txt
 
 # Create a script to detect GPU architecture and build Triton accordingly
 RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
