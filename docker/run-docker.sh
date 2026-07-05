@@ -180,7 +180,7 @@ run_test() {
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cuda
+            /opt/triton-venv/bin/python triton_test.py --device cuda
         
     else
         echo "🖥️  NVIDIA runtime not available, running without GPU support..."
@@ -200,7 +200,7 @@ run_test() {
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
+            /opt/triton-venv/bin/python triton_test.py --device cpu
     fi
     
     # Cleanup will be done automatically by trap on function exit
@@ -235,7 +235,7 @@ run_test_detailed() {
             -w /workspace \
             -e TRITON_BACKENDS_IN_TREE=1 \
             triton-local-build:latest \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --detailed
+            /opt/triton-venv/bin/python triton_test.py --detailed
     else
         echo "🖥️  NVIDIA runtime not available, running CPU-only tests..."
         docker run -it --rm \
@@ -243,7 +243,7 @@ run_test_detailed() {
             -w /workspace \
             -e TRITON_BACKENDS_IN_TREE=1 \
             triton-local-build:latest \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
+            /opt/triton-venv/bin/python triton_test.py --device cpu
     fi
 }
 
