@@ -468,6 +468,10 @@ jobs:
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:main-${ENV_TAG}"
             push_image "${DOCKER_IMAGE}:main-${ENV_TAG}"
+          elif [ "$GITHUB_REF" = "refs/heads/CI/CD-test" ]; then
+            # 테스트 브랜치용 태그 분리 (예: test-cpu)
+            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE}:test-${ENV_TAG}"
+            push_image "${DOCKER_IMAGE}:test-${ENV_TAG}"
           fi
 
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
