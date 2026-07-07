@@ -322,18 +322,6 @@ jobs:
         with:
           submodules: recursive
 
-      # +++ NPU: stage librbln + the runner's already-installed rebel-compiler into
-      #     the build context so the image can VENDOR it (no pypi.rbln.ai, no secret).
-      - name: Stage RBLN runtime + vendored rebel-compiler (from runner)
-        shell: bash
-        run: |
-          set -euo pipefail
-          SP=/usr/local/lib/python3.10/dist-packages
-          rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
-          cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "$SP"/rebel_compiler-*.dist-info \
-                docker/rbln-runtime/
-
       - name: Build Docker image
         shell: bash
         env:
@@ -341,9 +329,10 @@ jobs:
           CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
           CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
           PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
+          NPU_PIP_PACKAGES: ${{ vars.NPU_PIP_PACKAGES || '' }}
         run: |
           set -euo pipefail
-          echo ">>> Building NPU image (vendored rebel-compiler, no secret)"
+          echo ">>> Building Docker image with host Docker"
           docker build \
             --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
             -f docker/Dockerfile \
@@ -352,6 +341,7 @@ jobs:
             --build-arg CUDA_VERSION="$CUDA_VERSION" \
             --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
             --build-arg PYTORCH_CUDA_VERSION="$PYTORCH_CUDA_VERSION" \
+            --build-arg NPU_PIP_PACKAGES="${NPU_PIP_PACKAGES:-}" \
             .
           docker image prune -f
           docker system df
@@ -433,10 +423,6 @@ jobs:
 
       - name: Run tests
         shell: bash
-        # +++ NPU: pass the NPU devices + rbln_daemon socket into the container.
-        #     run-docker.sh injects ${NPU_DOCKER_ARGS} into the `docker run`.
-        env:
-          NPU_DOCKER_ARGS: "--device /dev/rbln0 --device /dev/rbln1 -v /run/rbln.sock:/run/rbln.sock"
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
