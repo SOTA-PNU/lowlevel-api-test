@@ -3,7 +3,7 @@
 # Supports CUDA, CPU-only, and out-of-tree NPU backend builds
 
 # Use Ubuntu 24.04 base image and install CUDA manually
-FROM ubuntu:24.04
+FROM ubuntu:22.04
 
 # Build arguments for CUDA version detection (must be after FROM)
 ARG BUILD_MODE=cuda
@@ -11,6 +11,7 @@ ARG CUDA_VERSION=12.8
 ARG CUDA_ARCHITECTURE=sm_120
 ARG PYTORCH_CUDA_VERSION=cu128
 ARG NPU_PIP_PACKAGES=
+ARG RBLN_COMPILER_VERSION=0.10.0 
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -45,7 +46,7 @@ RUN echo "DEBUG: BUILD_MODE value is: '$BUILD_MODE'"
 # Install NVIDIA CUDA toolkit (only if BUILD_MODE is cuda)
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         echo "Installing CUDA toolkit..." && \
-        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
         dpkg -i cuda-keyring_1.1-1_all.deb && \
         apt-get update && \
         CUDA_PACKAGE_VERSION=$(echo "$CUDA_VERSION" | tr . -) && \
@@ -94,14 +95,18 @@ RUN /opt/triton-venv/bin/pip install numpy pytest
 # Install optional Rebellions/NPU Python packages. Public package names differ by
 # environment, so CI can pass NPU_PIP_PACKAGES or add requirements-npu.txt.
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
-        if [ -n "$NPU_PIP_PACKAGES" ]; then \
-            echo "Installing NPU packages: $NPU_PIP_PACKAGES" && \
-            /opt/triton-venv/bin/pip install $NPU_PIP_PACKAGES; \
-        fi; \
-        if [ -f requirements-npu.txt ]; then \
-            echo "Installing requirements-npu.txt" && \
-            /opt/triton-venv/bin/pip install -r requirements-npu.txt; \
-        fi; \
+        /opt/triton-venv/bin/pip install \
+            attrs cloudpickle cryptography decorator ml_dtypes numpy packaging "prettytable>=3.8" \
+            psutil scipy tornado tqdm typing_extensions; \
+    fi
+
+COPY docker/rbln-runtime/ /opt/rbln-lib/
+RUN if [ "$BUILD_MODE" = "npu" ]; then \
+        cp -a /opt/rbln-lib/librbln-*.so* /usr/lib/ && ldconfig && \
+        cp -a /opt/rbln-lib/rebel /opt/rbln-lib/tvm /opt/rbln-lib/rebel_compiler.libs \
+              /opt/rbln-lib/rebel_compiler-*.dist-info \
+              /opt/triton-venv/lib/python3.10/site-packages/ && \
+        /opt/triton-venv/bin/python -c "import rebel; print('vendored rebel-compiler', rebel.__version__)"; \
     fi
 
 # Install Triton build dependencies
@@ -201,16 +206,20 @@ RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
 RUN chmod +x /workspace/detect_and_build.sh
 
 # Run the detection and build script with BUILD_MODE environment variable
-RUN BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh
+RUN if [ "$BUILD_MODE" != "npu" ]; then BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh; fi
 
 # Keep --local-triton imports pointed at the built source tree.
-RUN rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton
+RUN if [ "$BUILD_MODE" != "npu" ]; then \
+        rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton; \
+    else \
+        rm -rf /workspace/triton; \
+    fi
 
 # Verify the build artifacts/backend registration for the selected build mode.
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         ls -la /opt/triton-src/python/triton/_C/ || echo "Build artifacts verification failed"; \
     elif [ "$BUILD_MODE" = "npu" ]; then \
-        /opt/triton-venv/bin/python -c "import rebel; print('Rebellions SDK present in image: rebel', rebel.__version__)"; \
+        /opt/triton-venv/bin/python -c "import rebel; print('rebel-compiler', rebel.__version__); from rebel.triton.backends import backends; ks=sorted(backends); print('rebel.triton backends:', ks); assert any(k.lower()=='rebel' for k in ks), 'rebel Triton backend not registered in the image'; print('OK: rebel Triton backend present')"; \
     else \
         echo "CPU-only build - skipping CUDA artifacts verification"; \
     fi
