@@ -180,7 +180,7 @@ run_test() {
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device npu
+            /opt/triton-venv/bin/python triton_test.py --device npu
 
     # CPU images should skip CUDA-only execution tests. Other images keep
     # the existing NVIDIA runtime detection behavior.
