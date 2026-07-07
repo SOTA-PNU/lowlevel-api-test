@@ -2,7 +2,10 @@
 # Automatically detects host CUDA version and builds accordingly
 # Supports CUDA, CPU-only, and out-of-tree NPU backend builds
 
-# Use Ubuntu 24.04 base image and install CUDA manually
+# +++ NPU: base changed 24.04 -> 22.04 because rebel-compiler ships ONLY cp310
+#     (Python 3.10) wheels. 22.04 (py3.10, glibc 2.35) still supports upstream
+#     Triton / torch / CUDA 12.8 toolkit, so cpu/gpu keep working. This is the one
+#     unavoidable shared change; all cpu/gpu logic below is otherwise unchanged.
 FROM ubuntu:22.04
 
 # Build arguments for CUDA version detection (must be after FROM)
@@ -11,7 +14,7 @@ ARG CUDA_VERSION=12.8
 ARG CUDA_ARCHITECTURE=sm_120
 ARG PYTORCH_CUDA_VERSION=cu128
 ARG NPU_PIP_PACKAGES=
-ARG RBLN_COMPILER_VERSION=0.10.0 
+ARG RBLN_COMPILER_VERSION=0.10.0   # +++ NPU: rebel-compiler (KMD 3.0.0 -> 0.10.x)
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -38,7 +41,10 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     gnupg2 \
     software-properties-common \
+    libdrm2 \
     && rm -rf /var/lib/apt/lists/*
+# +++ NPU: libdrm2 is REQUIRED by the npu runtime (librbln-thunk talks to the NPU
+#     via DRM). Harmless for cpu/gpu. Without it, NPU access SEGFAULTs at runtime.
 
 # Debug: Print BUILD_MODE value
 RUN echo "DEBUG: BUILD_MODE value is: '$BUILD_MODE'"
@@ -84,6 +90,8 @@ RUN /opt/triton-venv/bin/pip install --upgrade pip setuptools wheel
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA_VERSION}" && \
         /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath pillow; \
+    elif [ "$BUILD_MODE" = "npu" ]; then \
+        /opt/triton-venv/bin/pip install "torch==2.8.0" --index-url https://download.pytorch.org/whl/cpu; \
     else \
         /opt/triton-venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-deps && \
         /opt/triton-venv/bin/pip install filelock typing-extensions networkx jinja2 fsspec sympy==1.13.1 mpmath pillow; \
@@ -92,14 +100,27 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
 # Install additional requirements
 RUN /opt/triton-venv/bin/pip install numpy pytest
 
-# Install optional Rebellions/NPU Python packages. Public package names differ by
-# environment, so CI can pass NPU_PIP_PACKAGES or add requirements-npu.txt.
+# +++ NPU: rebel.triton comes from rebel-compiler. Instead of DOWNLOADING it from
+#     pypi.rbln.ai (which needs auth / a BuildKit secret), we VENDOR the host's
+#     already-installed rebel-compiler from the build context -> NO credentials,
+#     NO secret. Its PUBLIC dependencies are installed normally (public PyPI).
+#     The exact public deps come from rebel-compiler's own METADATA (Requires-Dist).
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
         /opt/triton-venv/bin/pip install \
             attrs cloudpickle cryptography decorator ml_dtypes numpy packaging "prettytable>=3.8" \
             psutil scipy tornado tqdm typing_extensions; \
     fi
 
+# +++ NPU: bake librbln user-space libs AND the vendored rebel-compiler packages.
+#     docker/rbln-runtime/ MUST exist (COPY always runs; use .gitkeep for cpu/gpu).
+#     Stage it on the RBLN host/runner (once, or via the CI step) with BOTH:
+#       mkdir -p docker/rbln-runtime
+#       cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
+#       cp -a /usr/local/lib/python3.10/dist-packages/rebel \
+#             /usr/local/lib/python3.10/dist-packages/tvm \
+#             /usr/local/lib/python3.10/dist-packages/rebel_compiler.libs \
+#             /usr/local/lib/python3.10/dist-packages/rebel_compiler-*.dist-info \
+#             docker/rbln-runtime/
 COPY docker/rbln-runtime/ /opt/rbln-lib/
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
         cp -a /opt/rbln-lib/librbln-*.so* /usr/lib/ && ldconfig && \
@@ -206,9 +227,12 @@ RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
 RUN chmod +x /workspace/detect_and_build.sh
 
 # Run the detection and build script with BUILD_MODE environment variable
+# +++ NPU: skip the upstream-Triton build for npu (it uses rebel.triton instead).
 RUN if [ "$BUILD_MODE" != "npu" ]; then BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh; fi
 
 # Keep --local-triton imports pointed at the built source tree.
+# +++ NPU: for npu just remove the unused upstream triton source (avoids a
+#     namespace-shadow on `import triton`); no symlink needed.
 RUN if [ "$BUILD_MODE" != "npu" ]; then \
         rm -rf /workspace/triton && ln -s /opt/triton-src /workspace/triton; \
     else \
