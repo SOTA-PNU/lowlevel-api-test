@@ -65,6 +65,17 @@ class TestResultInfo:
 def setup_triton_imports(use_local: bool = False, device: str = "auto"):
     global triton, tl, libdevice, extra
 
+    if device == "npu":
+        try:
+            import rebel.triton as _triton
+            import rebel.triton.language as _tl
+        except Exception as e:
+            print(f"Failed to import rebel.triton (install/vendor rebel-compiler): {e}")
+            sys.exit(1)
+        triton, tl, libdevice, extra = _triton, _tl, None, None
+        print(f"Using rebel.triton (RBLN) v{getattr(_triton, '__version__', '?')}")
+        return
+
     if device != "npu":
         os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 
@@ -174,7 +185,7 @@ def run_npu_capability_check() -> None:
     print(f"Detected NPU-related Python packages: {', '.join(found_packages) if found_packages else 'none'}")
 
     try:
-        from triton.backends import backends
+        from rebel.triton.backends import backends
     except Exception as e:
         raise RuntimeError(f"Failed to inspect Triton backends: {e}") from e
 
