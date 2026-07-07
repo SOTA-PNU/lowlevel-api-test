@@ -232,6 +232,19 @@ def run_npu_capability_check() -> None:
     print("NPU Triton backend capability check passed.")
 
 
+NPU_TRITON_EXAMPLES = [
+    ("vector_add_rank3", "01_vector_add_rank3.py"),
+    ("fused_softmax", "02_fused_softmax.py"),
+    ("matmul", "03_matmul.py"),
+    ("layer_norm_forward", "05_layer_norm_forward.py"),
+    ("flash_attention", "06_flash_attention.py"),
+    ("math_function", "07_math_function.py"),
+    ("block_scaled_matmul", "10_block_scaled_matmul.py"),
+]
+
+def run_npu_triton_examples_test() -> bool:
+    pass
+
 def run_npu_torch_ops_test() -> bool:
     """Run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch + rebel.Runtime.
 
@@ -2370,6 +2383,7 @@ Examples:
         run_npu_capability_check()
         # +++ NPU: the upstream Triton op suite can't run on NPU (no eager kernel[grid]).
         #     Instead run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch.
+        #NOTE jiwon: Need to add run_npu_triton_examples_test()
         ok = run_npu_torch_ops_test()
         raise SystemExit(0 if ok else 1)
     _require_cuda(args.device)
