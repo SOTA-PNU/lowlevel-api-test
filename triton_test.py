@@ -65,6 +65,8 @@ class TestResultInfo:
 def setup_triton_imports(use_local: bool = False, device: str = "auto"):
     global triton, tl, libdevice, extra
 
+    # +++ NPU: use rebel.triton (from rebel-compiler), NOT upstream triton. The npu
+    #     image has no upstream triton; rebel.triton provides the "rebel" backend.
     if device == "npu":
         try:
             import rebel.triton as _triton
@@ -185,7 +187,7 @@ def run_npu_capability_check() -> None:
     print(f"Detected NPU-related Python packages: {', '.join(found_packages) if found_packages else 'none'}")
 
     try:
-        from rebel.triton.backends import backends
+        from rebel.triton.backends import backends   # +++ NPU: rebel.triton, not upstream triton
     except Exception as e:
         raise RuntimeError(f"Failed to inspect Triton backends: {e}") from e
 
@@ -228,6 +230,80 @@ def run_npu_capability_check() -> None:
         )
 
     print("NPU Triton backend capability check passed.")
+
+
+def run_npu_torch_ops_test() -> bool:
+    """Run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch + rebel.Runtime.
+
+    RBLN Triton has no eager `kernel[grid]` launch (it is compile-graph / custom-op), so the
+    upstream Triton op suite cannot run on the NPU. This is the real path to run operations on
+    the NPU: build a torch module of supported ops, compile with rebel-compiler, run via
+    rebel.Runtime, and compare to CPU. Returns True if all ops pass.
+    Supported ops: https://docs.rbln.ai/latest/misc/supported_ops_pytorch.html
+    """
+    import numpy as np
+    import rebel
+
+    torch.manual_seed(0)
+    f32 = "float32"
+
+    class _Add(torch.nn.Module):
+        def forward(self, a, b): return a + b
+    class _Mul(torch.nn.Module):
+        def forward(self, a, b): return a * b
+    class _MatMul(torch.nn.Module):
+        def forward(self, a, b): return torch.matmul(a, b)
+    class _Linear(torch.nn.Module):
+        def __init__(s): super().__init__(); s.l = torch.nn.Linear(64, 128)
+        def forward(s, x): return s.l(x)
+    class _ReLU(torch.nn.Module):
+        def forward(self, x): return torch.relu(x)
+    class _GELU(torch.nn.Module):
+        def forward(self, x): return torch.nn.functional.gelu(x)
+    class _Sigmoid(torch.nn.Module):
+        def forward(self, x): return torch.sigmoid(x)
+    class _LayerNorm(torch.nn.Module):
+        def __init__(s): super().__init__(); s.n = torch.nn.LayerNorm(64)
+        def forward(s, x): return s.n(x)
+    class _Softmax(torch.nn.Module):
+        def forward(self, x): return torch.softmax(x, dim=-1)
+    class _Conv2d(torch.nn.Module):
+        def __init__(s): super().__init__(); s.c = torch.nn.Conv2d(3, 8, 3, padding=1)
+        def forward(s, x): return torch.relu(s.c(x))
+
+    cases = [
+        ("add",       _Add(),       [("a", [8, 64], f32), ("b", [8, 64], f32)],  (torch.randn(8, 64), torch.randn(8, 64))),
+        ("mul",       _Mul(),       [("a", [8, 64], f32), ("b", [8, 64], f32)],  (torch.randn(8, 64), torch.randn(8, 64))),
+        ("matmul",    _MatMul(),    [("a", [8, 64], f32), ("b", [64, 32], f32)], (torch.randn(8, 64), torch.randn(64, 32))),
+        ("linear",    _Linear(),    [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
+        ("relu",      _ReLU(),      [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
+        ("gelu",      _GELU(),      [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
+        ("sigmoid",   _Sigmoid(),   [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
+        ("layernorm", _LayerNorm(), [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
+        ("softmax",   _Softmax(),   [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
+        ("conv2d",    _Conv2d(),    [("x", [1, 3, 16, 16], f32)],                (torch.randn(1, 3, 16, 16),)),
+    ]
+
+    print("\n[NPU] Running RBLN-supported PyTorch ops on the NPU (rebel.compile_from_torch + Runtime)")
+    print(f"{'op':12s} {'status':7s} {'max_abs_err':>12s}")
+    all_ok = True
+    for name, mod, info, inputs in cases:
+        try:
+            compiled = rebel.compile_from_torch(mod.eval(), info)
+            rt = rebel.Runtime(compiled)
+            out = np.asarray(rt(*[t.numpy() for t in inputs]))
+            ref = mod(*inputs).detach().numpy()
+            o = out.reshape(-1)[:ref.size]
+            r = ref.reshape(-1)
+            err = float(np.max(np.abs(o - r)))
+            ok = bool(np.allclose(o, r, atol=5e-2, rtol=5e-2))
+            print(f"{name:12s} {'PASS' if ok else 'FAIL':7s} {err:12.2e}")
+            all_ok = all_ok and ok
+        except Exception as e:
+            print(f"{name:12s} {'ERROR':7s}   {type(e).__name__}: {str(e)[:60]}")
+            all_ok = False
+    print(f"\n[NPU] PyTorch-ops-on-NPU: {'ALL PASSED' if all_ok else 'SOME FAILED'}")
+    return all_ok
 
 
 def _load_temp_module(source, prefix: str, module_name: str):
@@ -2292,8 +2368,11 @@ Examples:
 
     if args.device == "npu":
         run_npu_capability_check()
-    else:
-        _require_cuda(args.device)
+        # +++ NPU: the upstream Triton op suite can't run on NPU (no eager kernel[grid]).
+        #     Instead run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch.
+        ok = run_npu_torch_ops_test()
+        raise SystemExit(0 if ok else 1)
+    _require_cuda(args.device)
 
     print(f"Triton: {getattr(triton, '__version__', 'unknown')}")
     print(f"Device: {_device_string()}")
