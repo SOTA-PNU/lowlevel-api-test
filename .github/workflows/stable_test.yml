@@ -236,32 +236,65 @@ jobs:
           path: build_args.npu.env
           retention-days: 7
 
-  build-cpu:
-    name: Build CPU Image
-    runs-on: [self-hosted, cpu-runner]
-    needs: env-cpu
-    if: ${{ needs.env-cpu.result == 'success' }}
+  build-npu:
+    name: Build NPU Image
+    runs-on: [self-hosted, npu-runner]
+    needs: env-npu
+    if: ${{ needs.env-npu.result == 'success' }}
     env:
-      DOCKER_IMAGE_TAG: cpu-latest
+      DOCKER_IMAGE_TAG: npu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      - name: Stage RBLN runtime + vendored rebel-compiler from runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SP=/usr/local/lib/python3.10/dist-packages
+          DST=docker/rbln-runtime-ci
+
+          rm -rf "$DST"
+          mkdir -p "$DST"
+
+          cp -a /usr/lib/librbln-*.so* "$DST/"
+          cp -a \
+            "$SP/rebel" \
+            "$SP/tvm" \
+            "$SP/rebel_compiler.libs" \
+            "$SP"/rebel_compiler-*.dist-info \
+            "$DST/"
+
+          chmod -R u+rwX "$DST"
+          ls -la "$DST"
+
+      - name: Create NPU Dockerfile for CI staging dir
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sed 's#COPY docker/rbln-runtime/ /opt/rbln-lib/#COPY docker/rbln-runtime-ci/ /opt/rbln-lib/#' \
+            docker/Dockerfile > docker/Dockerfile.npu-ci
+
+          grep -n "rbln-runtime" docker/Dockerfile.npu-ci || true
+          grep -n "rbln-runtime-ci" docker/Dockerfile.npu-ci || true
+
       - name: Build Docker image
         shell: bash
         env:
-          BUILD_MODE: ${{ needs.env-cpu.outputs.build_mode }}
-          CUDA_VERSION: ${{ needs.env-cpu.outputs.cuda_version }}
-          CUDA_ARCHITECTURE: ${{ needs.env-cpu.outputs.cuda_architecture }}
-          PYTORCH_CUDA_VERSION: ${{ needs.env-cpu.outputs.pytorch_cuda_version }}
+          BUILD_MODE: ${{ needs.env-npu.outputs.build_mode }}
+          CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
+          CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
+          PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
         run: |
           set -euo pipefail
-          echo ">>> Building Docker image with host Docker"
+          echo ">>> Building NPU image (vendored rebel-compiler, no secret)"
           docker build \
             --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
-            -f docker/Dockerfile \
+            -f docker/Dockerfile.npu-ci \
             -t "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
             --build-arg BUILD_MODE="$BUILD_MODE" \
             --build-arg CUDA_VERSION="$CUDA_VERSION" \
@@ -274,8 +307,10 @@ jobs:
   build-gpu:
     name: Build GPU Image
     runs-on: [self-hosted, gpu-runner]
-    needs: env-gpu
-    if: ${{ needs.env-gpu.result == 'success' }}
+    needs:
+      - env-gpu
+      - build-npu
+    if: ${{ always() && needs.env-gpu.result == 'success' && needs.build-npu.result == 'success' }}
     env:
       DOCKER_IMAGE_TAG: gpu-latest
       NVIDIA_VISIBLE_DEVICES: void
@@ -309,41 +344,31 @@ jobs:
           docker image prune -f
           docker system df
 
-  build-npu:
-    name: Build NPU Image
-    runs-on: [self-hosted, npu-runner]
-    needs: env-npu
-    if: ${{ needs.env-npu.result == 'success' }}
+  build-cpu:
+    name: Build CPU Image
+    runs-on: [self-hosted, cpu-runner]
+    needs:
+      - env-cpu
+      - build-gpu
+    if: ${{ always() && needs.env-cpu.result == 'success' && needs.build-gpu.result == 'success' }}
     env:
-      DOCKER_IMAGE_TAG: npu-latest
+      DOCKER_IMAGE_TAG: cpu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # +++ NPU: stage librbln + the runner's already-installed rebel-compiler into
-      #     the build context so the image can VENDOR it (no pypi.rbln.ai, no secret).
-      - name: Stage RBLN runtime + vendored rebel-compiler (from runner)
-        shell: bash
-        run: |
-          set -euo pipefail
-          SP=/usr/local/lib/python3.10/dist-packages
-          rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
-          cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "$SP"/rebel_compiler-*.dist-info \
-                docker/rbln-runtime/
-
       - name: Build Docker image
         shell: bash
         env:
-          BUILD_MODE: ${{ needs.env-npu.outputs.build_mode }}
-          CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
-          CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
-          PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
+          BUILD_MODE: ${{ needs.env-cpu.outputs.build_mode }}
+          CUDA_VERSION: ${{ needs.env-cpu.outputs.cuda_version }}
+          CUDA_ARCHITECTURE: ${{ needs.env-cpu.outputs.cuda_architecture }}
+          PYTORCH_CUDA_VERSION: ${{ needs.env-cpu.outputs.pytorch_cuda_version }}
         run: |
           set -euo pipefail
-          echo ">>> Building NPU image (vendored rebel-compiler, no secret)"
+          echo ">>> Building Docker image with host Docker"
           docker build \
             --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
             -f docker/Dockerfile \
@@ -356,15 +381,15 @@ jobs:
           docker image prune -f
           docker system df
 
-  test-cpu:
-    name: Test CPU Image
-    runs-on: [self-hosted, cpu-runner]
+  test-npu:
+    name: Test NPU Image
+    runs-on: [self-hosted, npu-runner]
     needs:
       - detect-changes
-      - build-cpu
-    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-cpu.result == 'success' || needs.build-cpu.result == 'skipped') }}
+      - build-npu
+    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-npu.result == 'success' || needs.build-npu.result == 'skipped') }}
     env:
-      DOCKER_IMAGE_TAG: cpu-latest
+      DOCKER_IMAGE_TAG: npu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -373,18 +398,18 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          NPU_DOCKER_ARGS: "--device /dev/rbln0 --device /dev/rbln1 -v /run/rbln.sock:/run/rbln.sock"
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
           if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
-            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
           else
-            echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
+            echo "::error::Missing NPU image ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Refusing to run NPU tests with the generic latest image. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test
+          sh docker/run-docker.sh test-npu
 
   test-gpu:
     name: Test GPU Image
@@ -392,7 +417,8 @@ jobs:
     needs:
       - detect-changes
       - build-gpu
-    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-gpu.result == 'success' || needs.build-gpu.result == 'skipped') }}
+      - test-npu
+    if: ${{ always() && needs.detect-changes.result == 'success' && needs.test-npu.result == 'success' && (needs.build-gpu.result == 'success' || needs.build-gpu.result == 'skipped') }}
     env:
       DOCKER_IMAGE_TAG: gpu-latest
     steps:
@@ -416,15 +442,16 @@ jobs:
           fi
           sh docker/run-docker.sh test
 
-  test-npu:
-    name: Test NPU Image
-    runs-on: [self-hosted, npu-runner]
+  test-cpu:
+    name: Test CPU Image
+    runs-on: [self-hosted, cpu-runner]
     needs:
       - detect-changes
-      - build-npu
-    if: ${{ always() && needs.detect-changes.result == 'success' && (needs.build-npu.result == 'success' || needs.build-npu.result == 'skipped') }}
+      - build-cpu
+      - test-gpu
+    if: ${{ always() && needs.detect-changes.result == 'success' && needs.test-gpu.result == 'success' && (needs.build-cpu.result == 'success' || needs.build-cpu.result == 'skipped') }}
     env:
-      DOCKER_IMAGE_TAG: npu-latest
+      DOCKER_IMAGE_TAG: cpu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -433,29 +460,27 @@ jobs:
 
       - name: Run tests
         shell: bash
-        # +++ NPU: pass the NPU devices + rbln_daemon socket into the container.
-        #     run-docker.sh injects ${NPU_DOCKER_ARGS} into the `docker run`.
-        env:
-          NPU_DOCKER_ARGS: "--device /dev/rbln0 --device /dev/rbln1 -v /run/rbln.sock:/run/rbln.sock"
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
           if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
+          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
+            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
           else
-            echo "::error::Missing NPU image ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Refusing to run NPU tests with the generic latest image. Re-run this workflow with force_build=true."
+            echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test-npu
+          sh docker/run-docker.sh test
 
-  release-cpu:
-    name: Release CPU Image
-    runs-on: [self-hosted, cpu-runner]
-    needs: test-cpu
-    if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
+  release-npu:
+    name: Release NPU Image
+    runs-on: [self-hosted, npu-runner]
+    needs: test-npu
+    if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
-      ENV_TAG: cpu
-      DOCKER_IMAGE_TAG: cpu-latest
+      ENV_TAG: npu
+      DOCKER_IMAGE_TAG: npu-latest
     steps:
       - name: Push release image
         shell: bash
@@ -492,8 +517,10 @@ jobs:
   release-gpu:
     name: Release GPU Image
     runs-on: [self-hosted, gpu-runner]
-    needs: test-gpu
-    if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
+    needs:
+      - test-gpu
+      - release-npu
+    if: ${{ always() && needs.test-gpu.result == 'success' && (needs.release-npu.result == 'success' || needs.release-npu.result == 'skipped') && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
       ENV_TAG: gpu
       DOCKER_IMAGE_TAG: gpu-latest
@@ -530,14 +557,16 @@ jobs:
             push_image "${DOCKER_IMAGE}:${GITHUB_REF_NAME}-${ENV_TAG}"
           fi
 
-  release-npu:
-    name: Release NPU Image
-    runs-on: [self-hosted, npu-runner]
-    needs: test-npu
-    if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
+  release-cpu:
+    name: Release CPU Image
+    runs-on: [self-hosted, cpu-runner]
+    needs:
+      - test-cpu
+      - release-gpu
+    if: ${{ always() && needs.test-cpu.result == 'success' && (needs.release-gpu.result == 'success' || needs.release-gpu.result == 'skipped') && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
-      ENV_TAG: npu
-      DOCKER_IMAGE_TAG: npu-latest
+      ENV_TAG: cpu
+      DOCKER_IMAGE_TAG: cpu-latest
     steps:
       - name: Push release image
         shell: bash
