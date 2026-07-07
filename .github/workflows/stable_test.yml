@@ -328,11 +328,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+      
           SP=/usr/local/lib/python3.10/dist-packages
-          rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
-          cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "$SP"/rebel_compiler-*.dist-info \
-                docker/rbln-runtime/
+          DST=docker/rbln-runtime
+      
+          # 이전 실행에서 root 소유 파일이 남아있을 수 있으므로 sudo로 제거
+          sudo rm -rf "$DST"
+          mkdir -p "$DST"
+      
+          # RBLN shared libraries 복사
+          sudo cp -a /usr/lib/librbln-*.so* "$DST/"
+      
+          # rebel-compiler Python 패키지 복사
+          sudo cp -a \
+            "$SP/rebel" \
+            "$SP/tvm" \
+            "$SP/rebel_compiler.libs" \
+            "$SP"/rebel_compiler-*.dist-info \
+            "$DST/"
+      
+          # Docker build context에서 일반 사용자도 읽을 수 있게 권한 정리
+          sudo chown -R "$(id -u):$(id -g)" "$DST"
+          chmod -R u+rwX,go+rX "$DST"
+      
+          ls -la "$DST"
 
       - name: Build Docker image
         shell: bash
