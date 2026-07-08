@@ -243,7 +243,60 @@ NPU_TRITON_EXAMPLES = [
 ]
 
 def run_npu_triton_examples_test() -> bool:
-    pass
+    """Run the RBLN Triton kernel examples (tests/rbln_triton/*.py) on the NPU.
+    Returns True only if every example passes.
+    """
+    import os
+    import subprocess
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    examples_dir = os.environ.get(
+        "RBLN_TRITON_EXAMPLES_DIR", os.path.join(here, "tests", "rbln_triton")
+    )
+
+    print("\n[NPU] Running RBLN Triton kernel examples (torch.compile backend='rbln')")
+    print(f"[NPU] examples dir: {examples_dir}")
+    if not os.path.isdir(examples_dir):
+        print(f"[NPU] ERROR: examples dir not found: {examples_dir}")
+        print("      Mount the repo's tests/ into the container, e.g.:")
+        print('      -v "$PWD/tests:/workspace/tests:ro"')
+        return False
+
+    print(f"{'example':<22}{'status':<8}detail")
+    all_ok = True
+    for name, fname in NPU_TRITON_EXAMPLES:
+        path = os.path.join(examples_dir, fname)
+        if not os.path.isfile(path):
+            print(f"{name:<22}{'MISSING':<8}{path}")
+            all_ok = False
+            continue
+
+        # Run in a fresh process so per-file Triton op registrations (all under the
+        # rbln_triton_ops:: namespace) never collide. RBLN_WRITE_RTOSA must be unset so the
+        # example's __main__ runs the check instead of writing an RTOSA graph.
+        env = dict(os.environ)
+        env.pop("RBLN_WRITE_RTOSA", None)
+        env["PYTHONPATH"] = ""
+        proc = subprocess.run(
+            [sys.executable, path],
+            cwd=examples_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        passed = proc.returncode == 0 and "PASSED" in proc.stdout
+        print(f"{name:<22}{'PASS' if passed else 'FAIL':<8}{'' if passed else f'exit={proc.returncode}'}")
+        if not passed:
+            all_ok = False
+            tail = (proc.stdout[-1500:] + "\n" + proc.stderr[-1500:]).strip()
+            print("  ----- output (tail) -----")
+            for line in tail.splitlines()[-25:]:
+                print(f"  {line}")
+            print("  -------------------------")
+
+    print(f"\n[NPU] Triton-examples-on-NPU: {'ALL PASSED' if all_ok else 'SOME FAILED'}")
+    return all_ok
+
 
 def run_npu_torch_ops_test() -> bool:
     """Run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch + rebel.Runtime.
@@ -2384,7 +2437,7 @@ Examples:
         # +++ NPU: the upstream Triton op suite can't run on NPU (no eager kernel[grid]).
         #     Instead run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch.
         #NOTE jiwon: Need to add run_npu_triton_examples_test()
-        ok = run_npu_torch_ops_test()
+        ok = run_npu_torch_ops_test() and run_npu_triton_examples_test()
         raise SystemExit(0 if ok else 1)
     _require_cuda(args.device)
 
