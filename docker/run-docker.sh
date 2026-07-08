@@ -178,7 +178,8 @@ run_test() {
         docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
 
         echo ">>> Copying tests to container..."
-        docker cp tests "$CONTAINER_NAME:/workspace/tests"
+        docker exec "$CONTAINER_NAME" mkdir -p /workspace/tests
+        docker cp tests/. "$CONTAINER_NAME:/workspace/tests/"
 
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
@@ -198,7 +199,7 @@ run_test() {
             -e TRITON_BACKENDS_IN_TREE=1 \
             -e PYTHONPATH="" \
             triton-local-build:latest \
-            sleep 300
+            sleep 300 
 
         # Copy triton_test.py into container
         echo ">>> Copying triton_test.py to container..."
