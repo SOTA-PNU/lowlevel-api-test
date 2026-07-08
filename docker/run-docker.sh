@@ -177,6 +177,9 @@ run_test() {
         echo ">>> Copying triton_test.py to container..."
         docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
 
+        echo ">>> Copying tests to container..."
+        docker cp tests "$CONTAINER_NAME:/workspace/tests"
+
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
