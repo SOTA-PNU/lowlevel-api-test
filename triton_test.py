@@ -2492,7 +2492,7 @@ Examples:
 
 
     if args.device == "auto":
-    args.device = "cuda" if torch.cuda.is_available() else "cpu"
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     setup_triton_imports(args.local_triton, args.device)
     _set_runtime_device(args.device)
