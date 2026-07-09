@@ -77,8 +77,10 @@ def setup_triton_imports(use_local: bool = False, device: str = "auto"):
         triton, tl, libdevice, extra = _triton, _tl, None, None
         print(f"Using rebel.triton (RBLN) v{getattr(_triton, '__version__', '?')}")
         return
-
-    if device != "npu":
+    
+    if device == "cpu":
+        os.environ.setdefault("TRITON_CPU_BACKEND", "1")
+    else:
         os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 
     if use_local:
@@ -96,11 +98,19 @@ def setup_triton_imports(use_local: bool = False, device: str = "auto"):
     try:
         import triton as _triton
         import triton.language as _tl
-        import triton.language.extra.libdevice as _libdevice
-        from triton.language import extra as _extra
     except Exception as e:
         print(f"Failed to import Triton: {e}")
         sys.exit(1)
+
+    try:
+        import triton.language.extra.libdevice as _libdevice
+    except Exception:
+        _libdevice = None
+
+    try:
+        from triton.language import extra as _extra
+    except Exception:
+        _extra = None
 
     triton = _triton
     tl = _tl
@@ -113,7 +123,12 @@ RUNTIME_DEVICE = "cuda"
 
 def _set_runtime_device(device: str) -> None:
     global RUNTIME_DEVICE
-    RUNTIME_DEVICE = "npu" if device == "npu" else "cuda"
+    if device == "npu":
+        RUNTIME_DEVICE = "npu"
+    elif device == "cpu":
+        RUNTIME_DEVICE = "cpu"
+    else:
+        RUNTIME_DEVICE = "cuda"
 
 
 def _runtime_device() -> str:
@@ -128,6 +143,8 @@ def _require_cuda(device: str):
 
 
 def _require_runtime_device(device: str):
+    if device == "cpu":
+        return
     if device == "npu":
         if not _torch_device_available("npu"):
             raise RuntimeError("NPU backend is available, but torch cannot create tensors on device='npu'.")
@@ -154,6 +171,8 @@ def _sync_device() -> None:
 def _device_string() -> str:
     if RUNTIME_DEVICE == "cuda":
         return f"CUDA ({torch.cuda.get_device_name(0)})"
+    if RUNTIME_DEVICE == "cpu":
+        return "CPU"
     npu_mod = getattr(torch, "npu", None)
     if npu_mod is not None and hasattr(npu_mod, "get_device_name"):
         try:
@@ -179,6 +198,43 @@ def _module_available(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError, ModuleNotFoundError):
         return False
+
+
+def run_cpu_capability_check() -> None:
+    print("\n[CPU] Checking Triton CPU backend capability...")
+    os.environ.setdefault("TRITON_CPU_BACKEND", "1")
+
+    try:
+        from triton.backends import backends
+        backend_names = sorted(backends.keys())
+    except Exception as e:
+        raise RuntimeError(f"Failed to inspect Triton CPU backend: {e}") from e
+
+    cpu_backend_names = [name for name in backend_names if "cpu" in name.lower()]
+
+    print(f"Registered Triton backends: {', '.join(backend_names) if backend_names else 'none'}")
+    print(f"CPU-like Triton backends: {', '.join(cpu_backend_names) if cpu_backend_names else 'none'}")
+
+    if not cpu_backend_names:
+        raise RuntimeError(
+            "CPU device requested, but Triton CPU backend is not registered. "
+            "Install/build triton-lang/triton-cpu in the CPU Docker image."
+        )
+
+    try:
+        torch.empty(1, device="cpu")
+    except Exception as e:
+        raise RuntimeError(f"PyTorch cannot create CPU tensors: {e}") from e
+
+    try:
+        triton.runtime.driver.set_active_to_cpu()
+        print("Triton CPU driver activated via set_active_to_cpu().")
+    except AttributeError:
+        print("set_active_to_cpu() not found; relying on TRITON_CPU_BACKEND=1.")
+    except Exception as e:
+        print(f"CPU driver activation warning: {e}")
+
+    print("CPU Triton backend capability check passed.")
 
 
 def run_npu_capability_check() -> None:
@@ -1553,6 +1609,8 @@ class Sig:
 
 
 def _raw_exported_libdevice_functions() -> List[str]:
+    if libdevice is None:
+        return []
     out = []
     for name in dir(libdevice):
         if name.startswith("_"):
@@ -2110,6 +2168,11 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
 def test_libdevice_only(args) -> Dict[str, TestResultInfo]:
     _require_runtime_device(args.device)
     results: Dict[str, TestResultInfo] = {}
+
+    if libdevice is None:
+        print("\n[libdevice] libdevice is not available in this Triton install. Skipping libdevice tests.")
+        return results
+
     funcs = _exported_libdevice_functions()
     if args.only:
         wanted = {x.strip() for x in args.only.split(",") if x.strip()}
@@ -2427,19 +2490,24 @@ Examples:
         print("  all                  : run all of the above")
         return
 
-    if args.device == "cpu":
-        print("CUDA is not available in CPU mode.")
-        print("Real Triton execution tests require a CUDA-capable GPU. Skipping tests on this runner.")
-        return
 
-    if args.device == "npu":
+    if args.device == "auto":
+    args.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    setup_triton_imports(args.local_triton, args.device)
+    _set_runtime_device(args.device)
+
+    if args.device == "cpu":
+        run_cpu_capability_check()
+    elif args.device == "npu":
         run_npu_capability_check()
         # +++ NPU: the upstream Triton op suite can't run on NPU (no eager kernel[grid]).
         #     Instead run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch.
         #NOTE jiwon: Need to add run_npu_triton_examples_test()
         ok = run_npu_torch_ops_test() and run_npu_triton_examples_test()
         raise SystemExit(0 if ok else 1)
-    _require_cuda(args.device)
+    else: 
+        _require_cuda(args.device)
 
     print(f"Triton: {getattr(triton, '__version__', 'unknown')}")
     print(f"Device: {_device_string()}")

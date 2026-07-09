@@ -78,7 +78,17 @@ COPY . /workspace/
 RUN git submodule update --init --recursive
 
 # Copy Triton source to a separate location to avoid mount conflicts
-RUN cp -r /workspace/triton /opt/triton-src
+# GPU: upstream Triton from ./triton
+# CPU: triton-cpu fork
+# NPU: rebel.triton is vendored later; upstream source is not built
+RUN if [ "$BUILD_MODE" = "cpu" ]; then \
+        echo "Cloning triton-cpu source for CPU backend..." && \
+        git clone https://github.com/triton-lang/triton-cpu.git /opt/triton-src && \
+        cd /opt/triton-src && \
+        git submodule update --init --recursive; \
+    else \
+        cp -r /workspace/triton /opt/triton-src; \
+    fi
 
 # Create virtual environment in /opt to avoid conflicts with host venv
 RUN python3 -m venv /opt/triton-venv
@@ -131,7 +141,9 @@ RUN if [ "$BUILD_MODE" = "npu" ]; then \
     fi
 
 # Install Triton build dependencies
-RUN /opt/triton-venv/bin/pip install -r triton/python/requirements.txt
+RUN if [ "$BUILD_MODE" != "npu" ]; then \
+        /opt/triton-venv/bin/pip install -r /opt/triton-src/python/requirements.txt; \
+    fi
 
 # Create a script to detect GPU architecture and build Triton accordingly
 RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
@@ -208,21 +220,27 @@ RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
     echo '    echo "🚀 Building Triton for CPU-only execution"' >> /workspace/detect_and_build.sh && \
     echo 'fi' >> /workspace/detect_and_build.sh && \
     echo '' >> /workspace/detect_and_build.sh && \
-    echo '# Force build Triton from source (skip pip installation)' >> /workspace/detect_and_build.sh && \
-    echo 'echo "🏗️  Building Triton from source (skipping pip installation)..."' >> /workspace/detect_and_build.sh && \
+        echo '# Build/install selected Triton source' >> /workspace/detect_and_build.sh && \
+    echo 'echo "🏗️  Building/installing selected Triton source..."' >> /workspace/detect_and_build.sh && \
     echo 'cd /opt/triton-src' >> /workspace/detect_and_build.sh && \
     echo '' >> /workspace/detect_and_build.sh && \
-    echo '# Install Triton in development mode' >> /workspace/detect_and_build.sh && \
-    echo '/opt/triton-venv/bin/pip install -e .' >> /workspace/detect_and_build.sh && \
+    echo 'if [ "$BUILD_MODE" = "cpu" ]; then' >> /workspace/detect_and_build.sh && \
+    echo '    echo "🏗️  Installing triton-cpu from source..."' >> /workspace/detect_and_build.sh && \
+    echo '    export TRITON_CPU_BACKEND=1' >> /workspace/detect_and_build.sh && \
+    echo '    /opt/triton-venv/bin/pip install -e . --no-build-isolation' >> /workspace/detect_and_build.sh && \
+    echo 'elif [ "$BUILD_MODE" = "cuda" ]; then' >> /workspace/detect_and_build.sh && \
+    echo '    echo "🏗️  Installing upstream Triton from source..."' >> /workspace/detect_and_build.sh && \
+    echo '    /opt/triton-venv/bin/pip install -e .' >> /workspace/detect_and_build.sh && \
+    echo '    /opt/triton-venv/bin/python setup.py build_ext --inplace' >> /workspace/detect_and_build.sh && \
+    echo 'else' >> /workspace/detect_and_build.sh && \
+    echo '    echo "🧠 NPU build uses rebel.triton; skipping upstream Triton build."' >> /workspace/detect_and_build.sh && \
+    echo 'fi' >> /workspace/detect_and_build.sh && \
     echo '' >> /workspace/detect_and_build.sh && \
-    echo '# Build extensions with proper architecture' >> /workspace/detect_and_build.sh && \
-    echo '/opt/triton-venv/bin/python setup.py build_ext --inplace' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo 'echo "✅ Triton built successfully from source"' >> /workspace/detect_and_build.sh && \
+    echo 'echo "✅ Triton source install/build step completed"' >> /workspace/detect_and_build.sh && \
     echo '' >> /workspace/detect_and_build.sh && \
     echo '# Verify installation' >> /workspace/detect_and_build.sh && \
     echo 'echo "🧪 Verifying Triton installation..."' >> /workspace/detect_and_build.sh && \
-    echo '/opt/triton-venv/bin/python -c "import triton; print(f\"✅ Triton imported successfully\"); import torch; print(f\"📋 PyTorch version: {torch.__version__}\"); print(f\"📋 CUDA available: {torch.cuda.is_available()}\"); print(\"📋 Running in CPU-only mode\" if not torch.cuda.is_available() else f\"📋 CUDA version: {torch.version.cuda}\")"' >> /workspace/detect_and_build.sh
+    echo 'if [ "$BUILD_MODE" = "cpu" ]; then TRITON_CPU_BACKEND=1 /opt/triton-venv/bin/python -c "import triton; print(\"✅ triton-cpu imported successfully\")"; elif [ "$BUILD_MODE" = "cuda" ]; then /opt/triton-venv/bin/python -c "import triton; import torch; print(\"✅ Triton imported successfully\"); print(f\"CUDA available: {torch.cuda.is_available()}\")"; else echo "NPU uses rebel.triton verification later"; fi' >> /workspace/detect_and_build.sh
 
 RUN chmod +x /workspace/detect_and_build.sh
 
@@ -244,8 +262,8 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
         ls -la /opt/triton-src/python/triton/_C/ || echo "Build artifacts verification failed"; \
     elif [ "$BUILD_MODE" = "npu" ]; then \
         /opt/triton-venv/bin/python -c "import rebel; print('rebel-compiler', rebel.__version__); from rebel.triton.backends import backends; ks=sorted(backends); print('rebel.triton backends:', ks); assert any(k.lower()=='rebel' for k in ks), 'rebel Triton backend not registered in the image'; print('OK: rebel Triton backend present')"; \
-    else \
-        echo "CPU-only build - skipping CUDA artifacts verification"; \
+    elif [ "$BUILD_MODE" = "cpu" ]; then \
+        TRITON_CPU_BACKEND=1 /opt/triton-venv/bin/python -c "import triton; print('OK: triton-cpu import works')"; \
     fi
 
 # Set default environment

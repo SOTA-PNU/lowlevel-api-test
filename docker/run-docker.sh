@@ -216,7 +216,7 @@ run_test() {
         # Start container in background
         docker run -d --name "$CONTAINER_NAME" \
             -w /workspace \
-            -e TRITON_BACKENDS_IN_TREE=1 \
+            -e TRITON_CPU_BACKEND=1 \
             -e PYTHONPATH="" \
             triton-local-build:latest \
             sleep 300
@@ -228,6 +228,7 @@ run_test() {
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
+            env TRITON_CPU_BACKEND=1 \
             /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
     fi
 
