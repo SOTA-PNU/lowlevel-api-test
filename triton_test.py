@@ -19,6 +19,7 @@ libdevice = None
 extra = None
 
 EXCLUDED_LIBDEVICE_FUNCS = {"fast_tanhf"}
+CPU_UNSUPPORTED_TL = {"debug_barrier"}
 
 class TestResult(Enum):
     PASS = "PASS"
@@ -1196,6 +1197,11 @@ def test_tl_only(args):
 
         try:
             fn = getattr(tl, name)
+            
+            if args.device == "cpu" and name in CPU_UNSUPPORTED_TL:
+                _record(results, f"tl.{name}", "tl", "-", "skip", TestResult.SKIP, 
+                        t0, detail="unsupported on triton-cpu backend")
+                continue
 
             # --- unary ---
             if name in TL_UNARY:
@@ -2346,6 +2352,11 @@ def test_extra_only(args) -> Dict[str, TestResultInfo]:
 def test_all(args) -> Dict[str, TestResultInfo]:
     results: Dict[str, TestResultInfo] = {}
     results.update(test_tl_only(args))
+
+    if args.device == "cpu":
+        print("\n[CPU] Skipping libdevice and extra.cuda; CPU mode tests tl only.")
+        return results
+
     results.update(test_libdevice_only(args))
     results.update(test_extra_only(args))
     return results
@@ -2499,6 +2510,9 @@ Examples:
 
     if args.device == "cpu":
         run_cpu_capability_check()
+        print("[CPU] CPU mode tests tl only. Skipping libdevice and extra.cuda.")
+        args.module = "tl"
+
     elif args.device == "npu":
         run_npu_capability_check()
         # +++ NPU: the upstream Triton op suite can't run on NPU (no eager kernel[grid]).
@@ -2521,7 +2535,7 @@ Examples:
         results = test_extra_only(args)
     else:
         results = test_all(args)
-    elapsed = time.time() - start
+    elapsed = time.time() - start 
 
     print(f"\nTESTING COMPLETED in {elapsed:.2f}s")
     report = generate_report(results, args)
