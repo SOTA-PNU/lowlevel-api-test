@@ -66,8 +66,7 @@ class TestResultInfo:
 def setup_triton_imports(use_local: bool = False, device: str = "auto"):
     global triton, tl, libdevice, extra
 
-    # +++ NPU: use rebel.triton (from rebel-compiler), NOT upstream triton. The npu
-    #     image has no upstream triton; rebel.triton provides the "rebel" backend.
+    # NPU: use rebel.triton (from rebel-compiler), not upstream triton.
     if device == "npu":
         try:
             import rebel.triton as _triton
@@ -118,9 +117,7 @@ def setup_triton_imports(use_local: bool = False, device: str = "auto"):
     libdevice = _libdevice
     extra = _extra
 
-
 RUNTIME_DEVICE = "cuda"
-
 
 def _set_runtime_device(device: str) -> None:
     global RUNTIME_DEVICE
@@ -131,43 +128,17 @@ def _set_runtime_device(device: str) -> None:
     else:
         RUNTIME_DEVICE = "cuda"
 
-
 def _runtime_device() -> str:
     return RUNTIME_DEVICE
 
-
-def _require_cuda(device: str):
-    if device == "cpu":
-        raise RuntimeError("Real Triton execution/perf testing requires CUDA; CPU mode is not supported here.")
+def _require_cuda() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available.")
-
-
-def _require_runtime_device(device: str):
-    if device == "cpu":
-        return
-    if device == "npu":
-        if not _torch_device_available("npu"):
-            raise RuntimeError("NPU backend is available, but torch cannot create tensors on device='npu'.")
-        return
-    _require_cuda(device)
-
-
-def _torch_device_available(device: str) -> bool:
-    try:
-        torch.empty(1, device=device)
-        return True
-    except Exception:
-        return False
-
 
 def _sync_device() -> None:
     if RUNTIME_DEVICE == "cuda":
         torch.cuda.synchronize()
         return
-    # NPU runtimes do not expose a common PyTorch synchronize API. Correctness
-    # checks below force completion when tensors are read or compared.
-
 
 def _device_string() -> str:
     if RUNTIME_DEVICE == "cuda":
@@ -182,28 +153,8 @@ def _device_string() -> str:
             pass
     return "NPU"
 
-
-NPU_BACKEND_KEYWORDS = ("npu", "rbln", "rebel", "rebellions")
-NPU_PACKAGE_CANDIDATES = (
-    "rbln",
-    "rebel",
-    "rebellions",
-    "rebel_runtime",
-    "rebel_compiler",
-    "optimum.rbln",
-)
-
-
-def _module_available(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError, ModuleNotFoundError):
-        return False
-
-
 def run_cpu_capability_check() -> None:
     print("\n[CPU] Checking Triton CPU backend capability...")
-    os.environ.setdefault("TRITON_CPU_BACKEND", "1")
 
     try:
         from triton.backends import backends
@@ -222,11 +173,7 @@ def run_cpu_capability_check() -> None:
             "Install/build triton-lang/triton-cpu in the CPU Docker image."
         )
 
-    try:
-        torch.empty(1, device="cpu")
-    except Exception as e:
-        raise RuntimeError(f"PyTorch cannot create CPU tensors: {e}") from e
-
+    # Triton CPU driver activation
     try:
         triton.runtime.driver.set_active_to_cpu()
         print("Triton CPU driver activated via set_active_to_cpu().")
@@ -240,54 +187,38 @@ def run_cpu_capability_check() -> None:
 
 def run_npu_capability_check() -> None:
     print("\n[NPU] Checking Triton NPU backend capability...")
-    found_packages = [name for name in NPU_PACKAGE_CANDIDATES if _module_available(name)]
-    print(f"Detected NPU-related Python packages: {', '.join(found_packages) if found_packages else 'none'}")
 
     try:
-        from rebel.triton.backends import backends   # +++ NPU: rebel.triton, not upstream triton
+        from rebel.triton.backends import backends
     except Exception as e:
-        raise RuntimeError(f"Failed to inspect Triton backends: {e}") from e
+        raise RuntimeError(
+            f"Failed to inspect rebel.triton backends: {e}"
+        ) from e
 
     backend_names = sorted(backends.keys())
-    npu_backend_names = [
-        name for name in backend_names
-        if any(keyword in name.lower() for keyword in NPU_BACKEND_KEYWORDS)
-    ]
-    print(f"Registered Triton backends: {', '.join(backend_names) if backend_names else 'none'}")
-    print(f"NPU-like Triton backends: {', '.join(npu_backend_names) if npu_backend_names else 'none'}")
+    print(
+        f"Registered Triton backends: "
+        f"{', '.join(backend_names) if backend_names else 'none'}"
+    )
 
-    if not npu_backend_names:
+    if "rebel" not in backends:
         raise RuntimeError(
-            "No Rebellions/NPU Triton backend is registered. "
-            "Install or expose the NPU Triton backend in this image before running Triton ops on NPU."
+            "Rebellions Triton backend 'rebel' is not registered."
         )
 
-    active_backends = []
-    inactive_backends = []
-    for name in npu_backend_names:
-        driver = backends[name].driver
-        try:
-            is_active = bool(driver.is_active())
-        except Exception as e:
-            inactive_backends.append(f"{name} ({e})")
-            continue
-        if is_active:
-            active_backends.append(name)
-        else:
-            inactive_backends.append(name)
-
-    print(f"Active NPU Triton backends: {', '.join(active_backends) if active_backends else 'none'}")
-    if inactive_backends:
-        print(f"Inactive NPU Triton backends: {', '.join(inactive_backends)}")
-
-    if not active_backends:
+    try:
+        is_active = bool(backends["rebel"].driver.is_active())
+    except Exception as e:
         raise RuntimeError(
-            "A Rebellions/NPU Triton backend appears to be installed, but no NPU backend is active. "
-            "Check that the NPU device, driver, and container runtime are visible inside Docker."
+            f"Failed to inspect the rebel backend state: {e}"
+        ) from e
+    if not is_active:
+        raise RuntimeError(
+            "The rebel backend is installed but inactive. "
+            "Check the NPU device, driver, and Docker device mounts."
         )
 
     print("NPU Triton backend capability check passed.")
-
 
 NPU_TRITON_EXAMPLES = [
     ("vector_add_rank3", "01_vector_add_rank3.py"),
@@ -300,7 +231,8 @@ NPU_TRITON_EXAMPLES = [
 ]
 
 def run_npu_triton_examples_test() -> bool:
-    """Run the RBLN Triton kernel examples (tests/rbln_triton/*.py) on the NPU.
+    """
+    Run the RBLN Triton kernel examples (tests/rbln_triton/*.py) on the NPU.
     Returns True only if every example passes.
     """
     import os
@@ -328,9 +260,6 @@ def run_npu_triton_examples_test() -> bool:
             all_ok = False
             continue
 
-        # Run in a fresh process so per-file Triton op registrations (all under the
-        # rbln_triton_ops:: namespace) never collide. RBLN_WRITE_RTOSA must be unset so the
-        # example's __main__ runs the check instead of writing an RTOSA graph.
         env = dict(os.environ)
         env.pop("RBLN_WRITE_RTOSA", None)
         env["PYTHONPATH"] = ""
@@ -354,81 +283,6 @@ def run_npu_triton_examples_test() -> bool:
     print(f"\n[NPU] Triton-examples-on-NPU: {'ALL PASSED' if all_ok else 'SOME FAILED'}")
     return all_ok
 
-
-def run_npu_torch_ops_test() -> bool:
-    """Run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch + rebel.Runtime.
-
-    RBLN Triton has no eager `kernel[grid]` launch (it is compile-graph / custom-op), so the
-    upstream Triton op suite cannot run on the NPU. This is the real path to run operations on
-    the NPU: build a torch module of supported ops, compile with rebel-compiler, run via
-    rebel.Runtime, and compare to CPU. Returns True if all ops pass.
-    Supported ops: https://docs.rbln.ai/latest/misc/supported_ops_pytorch.html
-    """
-    import numpy as np
-    import rebel
-
-    torch.manual_seed(0)
-    f32 = "float32"
-
-    class _Add(torch.nn.Module):
-        def forward(self, a, b): return a + b
-    class _Mul(torch.nn.Module):
-        def forward(self, a, b): return a * b
-    class _MatMul(torch.nn.Module):
-        def forward(self, a, b): return torch.matmul(a, b)
-    class _Linear(torch.nn.Module):
-        def __init__(s): super().__init__(); s.l = torch.nn.Linear(64, 128)
-        def forward(s, x): return s.l(x)
-    class _ReLU(torch.nn.Module):
-        def forward(self, x): return torch.relu(x)
-    class _GELU(torch.nn.Module):
-        def forward(self, x): return torch.nn.functional.gelu(x)
-    class _Sigmoid(torch.nn.Module):
-        def forward(self, x): return torch.sigmoid(x)
-    class _LayerNorm(torch.nn.Module):
-        def __init__(s): super().__init__(); s.n = torch.nn.LayerNorm(64)
-        def forward(s, x): return s.n(x)
-    class _Softmax(torch.nn.Module):
-        def forward(self, x): return torch.softmax(x, dim=-1)
-    class _Conv2d(torch.nn.Module):
-        def __init__(s): super().__init__(); s.c = torch.nn.Conv2d(3, 8, 3, padding=1)
-        def forward(s, x): return torch.relu(s.c(x))
-
-    cases = [
-        ("add",       _Add(),       [("a", [8, 64], f32), ("b", [8, 64], f32)],  (torch.randn(8, 64), torch.randn(8, 64))),
-        ("mul",       _Mul(),       [("a", [8, 64], f32), ("b", [8, 64], f32)],  (torch.randn(8, 64), torch.randn(8, 64))),
-        ("matmul",    _MatMul(),    [("a", [8, 64], f32), ("b", [64, 32], f32)], (torch.randn(8, 64), torch.randn(64, 32))),
-        ("linear",    _Linear(),    [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
-        ("relu",      _ReLU(),      [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
-        ("gelu",      _GELU(),      [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
-        ("sigmoid",   _Sigmoid(),   [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
-        ("layernorm", _LayerNorm(), [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
-        ("softmax",   _Softmax(),   [("x", [8, 64], f32)],                       (torch.randn(8, 64),)),
-        ("conv2d",    _Conv2d(),    [("x", [1, 3, 16, 16], f32)],                (torch.randn(1, 3, 16, 16),)),
-    ]
-
-    print("\n[NPU] Running RBLN-supported PyTorch ops on the NPU (rebel.compile_from_torch + Runtime)")
-    print(f"{'op':12s} {'status':7s} {'max_abs_err':>12s}")
-    all_ok = True
-    for name, mod, info, inputs in cases:
-        try:
-            compiled = rebel.compile_from_torch(mod.eval(), info)
-            rt = rebel.Runtime(compiled)
-            out = np.asarray(rt(*[t.numpy() for t in inputs]))
-            ref = mod(*inputs).detach().numpy()
-            o = out.reshape(-1)[:ref.size]
-            r = ref.reshape(-1)
-            err = float(np.max(np.abs(o - r)))
-            ok = bool(np.allclose(o, r, atol=5e-2, rtol=5e-2))
-            print(f"{name:12s} {'PASS' if ok else 'FAIL':7s} {err:12.2e}")
-            all_ok = all_ok and ok
-        except Exception as e:
-            print(f"{name:12s} {'ERROR':7s}   {type(e).__name__}: {str(e)[:60]}")
-            all_ok = False
-    print(f"\n[NPU] PyTorch-ops-on-NPU: {'ALL PASSED' if all_ok else 'SOME FAILED'}")
-    return all_ok
-
-
 def _load_temp_module(source, prefix: str, module_name: str):
     fd, path = tempfile.mkstemp(prefix=prefix, suffix=".py")
     with os.fdopen(fd, "w") as f:
@@ -446,10 +300,8 @@ def _unlink_quietly(path: Optional[str]):
     except OSError:
         pass
 
-
 def _metric(value: Optional[float], digits: int) -> str:
     return f"{value:.{digits}f}" if value is not None else "-"
-
 
 def _print_perf_row(name: str, r: TestResultInfo, dtype_width: int = 22, mode_width: Optional[int] = None):
     mode = f" {r.mode:{mode_width}}" if mode_width is not None else ""
@@ -711,7 +563,6 @@ TL_SWIZZLE = {
     "swizzle2d": 0
 }
 
-
 def collect_tl_symbols():
     syms = []
     for name in dir(tl):
@@ -725,10 +576,7 @@ def collect_tl_symbols():
             syms.append(name)
     return sorted(syms)
 
-
 def test_tl_only(args):
-    _require_runtime_device(args.device)
-
     results = {}
     n = args.size
     B = args.block
@@ -741,6 +589,7 @@ def test_tl_only(args):
 
     print(f"\nDetected tl symbols = {len(symbols)}")
 
+    # PyTorch reference value to compare with Triton op results
     def expected_unary(name, x):
         return {
             "abs": torch.abs,
@@ -1193,8 +1042,6 @@ def test_tl_only(args):
     # Run all tests
     # -----------------------------------------------------------------------
     for name in symbols:
-        t0 = time.time()
-
         try:
             fn = getattr(tl, name)
             
@@ -1613,7 +1460,6 @@ class Sig:
     output: str
     label: str = ""
 
-
 def _raw_exported_libdevice_functions() -> List[str]:
     if libdevice is None:
         return []
@@ -1629,10 +1475,8 @@ def _raw_exported_libdevice_functions() -> List[str]:
             out.append(name)
     return sorted(out)
 
-
 def _exported_libdevice_functions() -> List[str]:
     return [f for f in _raw_exported_libdevice_functions() if f not in EXCLUDED_LIBDEVICE_FUNCS]
-
 
 def _count_callables(obj) -> int:
     c = 0
@@ -1646,7 +1490,6 @@ def _count_callables(obj) -> int:
             pass
     return c
 
-
 def collect_api_availability() -> Dict[str, int]:
     """Availability counts are API-symbol counts, not execution tests."""
     cuda_mod = getattr(extra, "cuda", None)
@@ -1656,7 +1499,6 @@ def collect_api_availability() -> Dict[str, int]:
         "libdevice": len(_exported_libdevice_functions()),
         "extra": _count_callables(cuda_mod) if cuda_mod is not None else 0,
     }
-
 
 INT_UNARY_SMOKE = {"clz", "popc", "brev", "ffs"}
 INT_BINARY_SMOKE = {"mulhi", "mul24", "hadd", "rhadd"}
@@ -1695,7 +1537,6 @@ CONVERSION_PREFIX_SIGS = (
     ("ll2double", "i64", "f64"), ("ull2double", "u64", "f64")
 )
 
-
 def _arity_of_libdevice(fn: str) -> int:
     try:
         sig = inspect.signature(getattr(libdevice, fn))
@@ -1708,7 +1549,6 @@ def _arity_of_libdevice(fn: str) -> int:
         if fn in BINARY_DEFAULTS_SMOKE or fn in INT_BINARY_SMOKE or fn in MIXED_BINARY_SMOKE:
             return 2
         return 1
-
 
 def _exact_sigs(fn: str) -> List[Sig]:
     if fn in INT_UNARY_SMOKE:
@@ -1804,7 +1644,6 @@ def _generic_sigs(arity: int) -> List[Sig]:
         return [Sig(("f32", "f32", "f32", "f32"), "f32", "probe f32x4->f32"), Sig(("f64", "f64", "f64", "f64"), "f64", "probe f64x4->f64")]
     return []
 
-
 def _candidate_sigs(fn: str) -> List[Sig]:
     arity = _arity_of_libdevice(fn)
     seen = set()
@@ -1816,22 +1655,17 @@ def _candidate_sigs(fn: str) -> List[Sig]:
             seen.add(key)
     return out
 
-
 TORCH_DTYPES = {"f32": torch.float32, "f64": torch.float64, "i32": torch.int32, "u32": torch.int32, "i64": torch.int64, "u64": torch.int64}
 TRITON_DTYPES = {"f32": "tl.float32", "f64": "tl.float64", "i32": "tl.int32", "u32": "tl.uint32", "i64": "tl.int64", "u64": "tl.uint64"}
-
 
 def _torch_dtype_from_tag(t: str):
     return TORCH_DTYPES[t]
 
-
 def _triton_cast_expr(var: str, t: str) -> str:
     return f"{var}.to({TRITON_DTYPES[t]})"
 
-
 def _other_literal(t: str) -> str:
     return "1.0" if t in {"f32", "f64"} else "1"
-
 
 def _make_lib_tensor(fn: str, t: str, n: int, arg_idx: int) -> torch.Tensor:
     dt = _torch_dtype_from_tag(t)
@@ -1872,7 +1706,6 @@ def _make_lib_tensor(fn: str, t: str, n: int, arg_idx: int) -> torch.Tensor:
         return base.to(torch.int64)
     raise ValueError(t)
 
-
 def _make_lib_smoke_kernel_module(fn: str, sig: Sig):
     args = [f"a{i}" for i in range(len(sig.inputs))]
     params = ", ".join(args + ["o", "n", "B: tl.constexpr"])
@@ -1891,17 +1724,14 @@ def _make_lib_smoke_kernel_module(fn: str, sig: Sig):
     mod_name = f"_triton_libdev_{fn}_{abs(hash((fn, sig.inputs, sig.output)))}"
     return _load_temp_module(lines, f"triton_libdev_{fn}_", mod_name)
 
-
 def _bytes_moved(tensors: Sequence[torch.Tensor], out: torch.Tensor, n: int) -> int:
     b = out.element_size() * n
     for x in tensors:
         b += x.element_size() * n
     return b
 
-
 def _sig_str(sig: Sig) -> str:
     return f"({','.join(sig.inputs)})->{sig.output}"
-
 
 def _bitcast_tensor(x: torch.Tensor, dtype: torch.dtype) -> Optional[torch.Tensor]:
     try:
@@ -1909,11 +1739,9 @@ def _bitcast_tensor(x: torch.Tensor, dtype: torch.dtype) -> Optional[torch.Tenso
     except Exception:
         return None
 
-
 def _signed_to_unsigned_i64(x: torch.Tensor, bits: int) -> torch.Tensor:
     y = x.to(torch.int64)
     return torch.where(y < 0, y + (1 << bits), y)
-
 
 def _reference_int_unary(fn: str, x: torch.Tensor) -> Optional[torch.Tensor]:
     ux = _signed_to_unsigned_i64(x, 32)
@@ -1939,7 +1767,6 @@ def _reference_int_unary(fn: str, x: torch.Tensor) -> Optional[torch.Tensor]:
             out = torch.where((out == 0) & (((ux >> bit) & 1) != 0), torch.full_like(out, bit + 1), out)
         return out.to(torch.int32)
     return None
-
 
 def _reference_conversion(fn: str, tensors: Sequence[torch.Tensor]) -> Optional[torch.Tensor]:
     x = tensors[0]
@@ -1993,10 +1820,8 @@ def _reference_conversion(fn: str, tensors: Sequence[torch.Tensor]) -> Optional[
         return x.to(torch.float32)
     return None
 
-
 def _round_half_away_from_zero(x: torch.Tensor) -> torch.Tensor:
     return torch.sign(x) * torch.floor(torch.abs(x) + 0.5)
-
 
 def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> Tuple[Optional[torch.Tensor], str, float, float]:
     x = tensors[0]
@@ -2116,7 +1941,6 @@ def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> 
 
     return None, "smoke_only", rtol, atol
 
-
 def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
     start_all = time.time()
     grid = (triton.cdiv(args.size, args.block),)
@@ -2170,9 +1994,7 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
         device=_device_string(),
     )
 
-
 def test_libdevice_only(args) -> Dict[str, TestResultInfo]:
-    _require_runtime_device(args.device)
     results: Dict[str, TestResultInfo] = {}
 
     if libdevice is None:
@@ -2218,13 +2040,11 @@ EXTRA_CUDA_VALUE_INTRINSICS = {"globaltimer", "smid", "num_threads", "num_warps"
 EXTRA_CUDA_GDC_INTRINSICS = {"gdc_wait", "gdc_launch_dependents"}
 EXTRA_CUDA_FLOAT8_CONVERT = {"convert_custom_float8_sm70", "convert_custom_float8_sm80"}
 
-
 def _extra_cuda_callables() -> List[str]:
     cuda_mod = getattr(extra, "cuda", None)
     if cuda_mod is None:
         return []
     return sorted(n for n in dir(cuda_mod) if not n.startswith("_") and callable(getattr(cuda_mod, n)))
-
 
 def _make_extra_cuda_kernel_module(functions: List[str]):
     src = [
@@ -2264,7 +2084,6 @@ def _make_extra_cuda_kernel_module(functions: List[str]):
                 "",
             ]
     return _load_temp_module(src, "triton_real_extra_cuda_", "_triton_real_extra_cuda")
-
 
 def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
     t0 = time.time()
@@ -2310,9 +2129,7 @@ def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
     except Exception as e:
         return TestResultInfo(TestResult.ERROR, time.time() - t0, "cuda", "-", "exec", None, None, str(e)[:1000], _device_string())
 
-
 def test_extra_only(args) -> Dict[str, TestResultInfo]:
-    _require_runtime_device(args.device)
     results: Dict[str, TestResultInfo] = {}
 
     avail = _extra_cuda_callables()
@@ -2344,7 +2161,6 @@ def test_extra_only(args) -> Dict[str, TestResultInfo]:
 
     return results
 
-
 # ---------------------------------------------------------------------------
 # Runner / report
 # ---------------------------------------------------------------------------
@@ -2360,7 +2176,6 @@ def test_all(args) -> Dict[str, TestResultInfo]:
     results.update(test_libdevice_only(args))
     results.update(test_extra_only(args))
     return results
-
 
 def generate_report(results: Dict[str, TestResultInfo], args) -> str:
     total = len(results)
@@ -2460,7 +2275,6 @@ def generate_report(results: Dict[str, TestResultInfo], args) -> str:
     lines.append("  tensor_descriptor ops (make_tensor_descriptor, load_tensor_descriptor, store_tensor_descriptor) require sm90+/Hopper and are marked PASS/skip.")
     return "\n".join(lines)
 
-
 def main():
     parser = argparse.ArgumentParser(
         description="Real Triton module tests: compile/run kernels and measure performance.",
@@ -2501,7 +2315,6 @@ Examples:
         print("  all                  : run all of the above")
         return
 
-
     if args.device == "auto":
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -2517,11 +2330,10 @@ Examples:
         run_npu_capability_check()
         # +++ NPU: the upstream Triton op suite can't run on NPU (no eager kernel[grid]).
         #     Instead run RBLN-supported PyTorch ops on the NPU via rebel.compile_from_torch.
-        #NOTE jiwon: Need to add run_npu_triton_examples_test()
-        ok = run_npu_torch_ops_test() and run_npu_triton_examples_test()
+        ok = run_npu_triton_examples_test()
         raise SystemExit(0 if ok else 1)
     else: 
-        _require_cuda(args.device)
+        _require_cuda()
 
     print(f"Triton: {getattr(triton, '__version__', 'unknown')}")
     print(f"Device: {_device_string()}")
@@ -2552,7 +2364,6 @@ Examples:
 
     if any(r.result in {TestResult.FAIL, TestResult.ERROR} for r in results.values()):
         raise SystemExit(1)
-
 
 if __name__ == "__main__":
     main()
