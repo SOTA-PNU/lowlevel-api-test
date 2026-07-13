@@ -1042,6 +1042,8 @@ def test_tl_only(args):
     # Run all tests
     # -----------------------------------------------------------------------
     for name in symbols:
+        t0 = time.time()
+        
         try:
             fn = getattr(tl, name)
             
