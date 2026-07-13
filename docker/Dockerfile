@@ -4,8 +4,6 @@
 
 # +++ NPU: base changed 24.04 -> 22.04 because rebel-compiler ships ONLY cp310
 #     (Python 3.10) wheels. 22.04 (py3.10, glibc 2.35) still supports upstream
-#     Triton / torch / CUDA 12.8 toolkit, so cpu/gpu keep working. This is the one
-#     unavoidable shared change; all cpu/gpu logic below is otherwise unchanged.
 FROM ubuntu:22.04
 
 # Build arguments for CUDA version detection (must be after FROM)
@@ -43,8 +41,6 @@ RUN apt-get update && apt-get install -y \
     software-properties-common \
     libdrm2 \
     && rm -rf /var/lib/apt/lists/*
-# +++ NPU: libdrm2 is REQUIRED by the npu runtime (librbln-thunk talks to the NPU
-#     via DRM). Harmless for cpu/gpu. Without it, NPU access SEGFAULTs at runtime.
 
 # Debug: Print BUILD_MODE value
 RUN echo "DEBUG: BUILD_MODE value is: '$BUILD_MODE'"
@@ -112,9 +108,7 @@ RUN /opt/triton-venv/bin/pip install numpy pytest
 
 # +++ NPU: rebel.triton comes from rebel-compiler. Instead of DOWNLOADING it from
 #     pypi.rbln.ai (which needs auth / a BuildKit secret), we VENDOR the host's
-#     already-installed rebel-compiler from the build context -> NO credentials,
-#     NO secret. Its PUBLIC dependencies are installed normally (public PyPI).
-#     The exact public deps come from rebel-compiler's own METADATA (Requires-Dist).
+#     already-installed rebel-compiler from the build context
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
         /opt/triton-venv/bin/pip install \
             attrs cloudpickle cryptography decorator ml_dtypes numpy packaging "prettytable>=3.8" \
@@ -122,15 +116,6 @@ RUN if [ "$BUILD_MODE" = "npu" ]; then \
     fi
 
 # +++ NPU: bake librbln user-space libs AND the vendored rebel-compiler packages.
-#     docker/rbln-runtime/ MUST exist (COPY always runs; use .gitkeep for cpu/gpu).
-#     Stage it on the RBLN host/runner (once, or via the CI step) with BOTH:
-#       mkdir -p docker/rbln-runtime
-#       cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-#       cp -a /usr/local/lib/python3.10/dist-packages/rebel \
-#             /usr/local/lib/python3.10/dist-packages/tvm \
-#             /usr/local/lib/python3.10/dist-packages/rebel_compiler.libs \
-#             /usr/local/lib/python3.10/dist-packages/rebel_compiler-*.dist-info \
-#             docker/rbln-runtime/
 COPY docker/rbln-runtime/ /opt/rbln-lib/
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
         cp -a /opt/rbln-lib/librbln-*.so* /usr/lib/ && ldconfig && \
@@ -145,108 +130,28 @@ RUN if [ "$BUILD_MODE" != "npu" ]; then \
         /opt/triton-venv/bin/pip install -r /opt/triton-src/python/requirements.txt; \
     fi
 
-# Create a script to detect GPU architecture and build Triton accordingly
-RUN echo '#!/bin/bash' > /workspace/detect_and_build.sh && \
-    echo 'set -e' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo 'echo "🔍 Detecting build mode and architecture..."' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo '# Check build mode from environment' >> /workspace/detect_and_build.sh && \
-    echo 'if [ "$BUILD_MODE" = "cpu" ]; then' >> /workspace/detect_and_build.sh && \
-    echo '    echo "📋 CPU-only build mode detected"' >> /workspace/detect_and_build.sh && \
-    echo '    CUDA_ARCH="none"' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🏗️  Building Triton for CPU-only execution"' >> /workspace/detect_and_build.sh && \
-    echo 'elif [ "$BUILD_MODE" = "npu" ]; then' >> /workspace/detect_and_build.sh && \
-    echo '    echo "📋 NPU build mode detected"' >> /workspace/detect_and_build.sh && \
-    echo '    CUDA_ARCH="none"' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🏗️  Building Triton with out-of-tree NPU backend support"' >> /workspace/detect_and_build.sh && \
-    echo 'else' >> /workspace/detect_and_build.sh && \
-    echo '    echo "📋 CUDA build mode detected"' >> /workspace/detect_and_build.sh && \
-    echo '    ' >> /workspace/detect_and_build.sh && \
-    echo '    # Detect CUDA version' >> /workspace/detect_and_build.sh && \
-    echo '    if command -v nvcc &> /dev/null; then' >> /workspace/detect_and_build.sh && \
-    echo '        CUDA_VERSION=$(nvcc --version | grep -oP "release \K[0-9]+\.[0-9]+" | head -1)' >> /workspace/detect_and_build.sh && \
-    echo '        echo "📋 Detected CUDA version: $CUDA_VERSION"' >> /workspace/detect_and_build.sh && \
-    echo '    else' >> /workspace/detect_and_build.sh && \
-    echo '        echo "⚠️  nvcc not found, using default CUDA architecture"' >> /workspace/detect_and_build.sh && \
-    echo '    fi' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo '    # Detect GPU architecture' >> /workspace/detect_and_build.sh && \
-    echo '    if command -v nvidia-smi &> /dev/null; then' >> /workspace/detect_and_build.sh && \
-    echo '        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)' >> /workspace/detect_and_build.sh && \
-    echo '        echo "🎮 Detected GPU: $GPU_NAME"' >> /workspace/detect_and_build.sh && \
-    echo '        ' >> /workspace/detect_and_build.sh && \
-    echo '        # Map GPU names to CUDA architectures' >> /workspace/detect_and_build.sh && \
-    echo '        case "$GPU_NAME" in' >> /workspace/detect_and_build.sh && \
-    echo '            *"Blackwell"*|*"RTX PRO 6000"*)' >> /workspace/detect_and_build.sh && \
-    echo '                CUDA_ARCH="sm_120"' >> /workspace/detect_and_build.sh && \
-    echo '                echo "🏗️  Using CUDA architecture: $CUDA_ARCH (Blackwell)"' >> /workspace/detect_and_build.sh && \
-    echo '                ;;' >> /workspace/detect_and_build.sh && \
-    echo '            *"Hopper"*|*"H100"*)' >> /workspace/detect_and_build.sh && \
-    echo '                CUDA_ARCH="sm_90"' >> /workspace/detect_and_build.sh && \
-    echo '                echo "🏗️  Using CUDA architecture: $CUDA_ARCH (Hopper)"' >> /workspace/detect_and_build.sh && \
-    echo '                ;;' >> /workspace/detect_and_build.sh && \
-    echo '            *"Ampere"*|*"A100"*|*"RTX 30"*|*"RTX 40"*)' >> /workspace/detect_and_build.sh && \
-    echo '                CUDA_ARCH="sm_80"' >> /workspace/detect_and_build.sh && \
-    echo '                echo "🏗️  Using CUDA architecture: $CUDA_ARCH (Ampere)"' >> /workspace/detect_and_build.sh && \
-    echo '                ;;' >> /workspace/detect_and_build.sh && \
-    echo '            *"Turing"*|*"RTX 20"*|*"GTX 16"*)' >> /workspace/detect_and_build.sh && \
-    echo '                CUDA_ARCH="sm_75"' >> /workspace/detect_and_build.sh && \
-    echo '                echo "🏗️  Using CUDA architecture: $CUDA_ARCH (Turing)"' >> /workspace/detect_and_build.sh && \
-    echo '                ;;' >> /workspace/detect_and_build.sh && \
-    echo '            *"Volta"*|*"V100"*)' >> /workspace/detect_and_build.sh && \
-    echo '                CUDA_ARCH="sm_70"' >> /workspace/detect_and_build.sh && \
-    echo '                echo "🏗️  Using CUDA architecture: $CUDA_ARCH (Volta)"' >> /workspace/detect_and_build.sh && \
-    echo '                ;;' >> /workspace/detect_and_build.sh && \
-    echo '            *)' >> /workspace/detect_and_build.sh && \
-    echo '                CUDA_ARCH="sm_80"  # Default to Ampere' >> /workspace/detect_and_build.sh && \
-    echo '                echo "🏗️  Unknown GPU, using default CUDA architecture: $CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
-    echo '                ;;' >> /workspace/detect_and_build.sh && \
-    echo '        esac' >> /workspace/detect_and_build.sh && \
-    echo '    else' >> /workspace/detect_and_build.sh && \
-    echo '        CUDA_ARCH="sm_80"  # Default fallback' >> /workspace/detect_and_build.sh && \
-    echo '        echo "🏗️  nvidia-smi not available, using default CUDA architecture: $CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
-    echo '    fi' >> /workspace/detect_and_build.sh && \
-    echo 'fi' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo '# Set environment variables for Triton build' >> /workspace/detect_and_build.sh && \
-    echo 'if [ "$BUILD_MODE" = "cuda" ]; then' >> /workspace/detect_and_build.sh && \
-    echo '    export TRITON_CUDA_ARCHITECTURES="$CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
-    echo '    export TORCH_CUDA_ARCH_LIST="$CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🚀 Building Triton with CUDA architecture: $CUDA_ARCH"' >> /workspace/detect_and_build.sh && \
-    echo 'elif [ "$BUILD_MODE" = "npu" ]; then' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🚀 Building Triton for NPU backend execution"' >> /workspace/detect_and_build.sh && \
-    echo 'else' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🚀 Building Triton for CPU-only execution"' >> /workspace/detect_and_build.sh && \
-    echo 'fi' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-        echo '# Build/install selected Triton source' >> /workspace/detect_and_build.sh && \
-    echo 'echo "🏗️  Building/installing selected Triton source..."' >> /workspace/detect_and_build.sh && \
-    echo 'cd /opt/triton-src' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo 'if [ "$BUILD_MODE" = "cpu" ]; then' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🏗️  Installing triton-cpu from source..."' >> /workspace/detect_and_build.sh && \
-    echo '    export TRITON_CPU_BACKEND=1' >> /workspace/detect_and_build.sh && \
-    echo '    /opt/triton-venv/bin/pip install -e . --no-build-isolation' >> /workspace/detect_and_build.sh && \
-    echo 'elif [ "$BUILD_MODE" = "cuda" ]; then' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🏗️  Installing upstream Triton from source..."' >> /workspace/detect_and_build.sh && \
-    echo '    /opt/triton-venv/bin/pip install -e .' >> /workspace/detect_and_build.sh && \
-    echo '    /opt/triton-venv/bin/python setup.py build_ext --inplace' >> /workspace/detect_and_build.sh && \
-    echo 'else' >> /workspace/detect_and_build.sh && \
-    echo '    echo "🧠 NPU build uses rebel.triton; skipping upstream Triton build."' >> /workspace/detect_and_build.sh && \
-    echo 'fi' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo 'echo "✅ Triton source install/build step completed"' >> /workspace/detect_and_build.sh && \
-    echo '' >> /workspace/detect_and_build.sh && \
-    echo '# Verify installation' >> /workspace/detect_and_build.sh && \
-    echo 'echo "🧪 Verifying Triton installation..."' >> /workspace/detect_and_build.sh && \
-    echo 'if [ "$BUILD_MODE" = "cpu" ]; then TRITON_CPU_BACKEND=1 /opt/triton-venv/bin/python -c "import triton; print(\"✅ triton-cpu imported successfully\")"; elif [ "$BUILD_MODE" = "cuda" ]; then /opt/triton-venv/bin/python -c "import triton; import torch; print(\"✅ Triton imported successfully\"); print(f\"CUDA available: {torch.cuda.is_available()}\")"; else echo "NPU uses rebel.triton verification later"; fi' >> /workspace/detect_and_build.sh
-
-RUN chmod +x /workspace/detect_and_build.sh
-
-# Run the detection and build script with BUILD_MODE environment variable
-# +++ NPU: skip the upstream-Triton build for npu (it uses rebel.triton instead).
-RUN if [ "$BUILD_MODE" != "npu" ]; then BUILD_MODE=$BUILD_MODE /workspace/detect_and_build.sh; fi
+# Build/install the Triton implementation selected by BUILD_MODE directly.
+# CUDA_VERSION and CUDA_ARCHITECTURE are already detected in stable_test.yml
+# and passed to this Dockerfile through --build-arg, so no detect script is needed.
+RUN if [ "$BUILD_MODE" = "cpu" ]; then \
+        echo "Installing triton-cpu from source..." && \
+        cd /opt/triton-src && \
+        export TRITON_CPU_BACKEND=1 && \
+        /opt/triton-venv/bin/pip install -e . --no-build-isolation && \
+        TRITON_CPU_BACKEND=1 /opt/triton-venv/bin/python -c \
+            "import triton; print('OK: triton-cpu imported successfully')"; \
+    elif [ "$BUILD_MODE" = "cuda" ]; then \
+        echo "Installing upstream Triton (runner architecture: ${CUDA_ARCHITECTURE})..." && \
+        cd /opt/triton-src && \
+        /opt/triton-venv/bin/pip install -e . --no-build-isolation && \
+        /opt/triton-venv/bin/python -c \
+            "import triton; print('OK: upstream Triton imported successfully')"; \
+    elif [ "$BUILD_MODE" = "npu" ]; then \
+        echo "NPU build uses vendored rebel.triton; skipping upstream Triton build."; \
+    else \
+        echo "ERROR: Unsupported BUILD_MODE=${BUILD_MODE}" >&2 && \
+        exit 1; \
+    fi
 
 # Keep --local-triton imports pointed at the built source tree.
 # +++ NPU: for npu just remove the unused upstream triton source (avoids a

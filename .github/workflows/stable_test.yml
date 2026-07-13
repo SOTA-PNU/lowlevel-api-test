@@ -239,8 +239,8 @@ jobs:
   build-cpu:
     name: Build CPU Image
     runs-on: [self-hosted, cpu-runner]
-    needs: [env-cpu, build-npu]                              # +++ NPU-first
-    if: ${{ always() && needs.env-cpu.result == 'success' }}  # +++ run after npu build (even if npu failed)
+    needs: env-cpu                          
+    if: ${{ needs.env-cpu.result == 'success' }}  
     env:
       DOCKER_IMAGE_TAG: cpu-latest
     steps:
@@ -274,8 +274,8 @@ jobs:
   build-gpu:
     name: Build GPU Image
     runs-on: [self-hosted, gpu-runner]
-    needs: [env-gpu, build-npu]                              # +++ NPU-first
-    if: ${{ always() && needs.env-gpu.result == 'success' }}  # +++ run after npu build (even if npu failed)
+    needs: env-gpu                            
+    if: ${{ needs.env-gpu.result == 'success' }} 
     env:
       DOCKER_IMAGE_TAG: gpu-latest
       NVIDIA_VISIBLE_DEVICES: void
