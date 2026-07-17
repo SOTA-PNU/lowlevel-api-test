@@ -1,400 +1,356 @@
 # Triton Operator Test Suite
 
-A comprehensive testing framework for **ALL 321 Triton operators**, systematically covering every available function across core operations, mathematical functions, standard library, and libdevice.
+A comprehensive testing framework for ALL 329 Triton operators, systematically covering every available function across core operations, mathematical functions, standard library, and libdevice.
 
 ## Overview
 
 This test suite systematically tests every operator defined in the Triton language to ensure:
+
 - Function availability and importability
-- Basic execution without errors
-- Correctness for key operations
+- Real kernel compilation and execution without errors
+- Correctness against PyTorch or local references where available
 - Performance characteristics
+- Backend compatibility across CUDA, CPU, and Rebellions NPU environments
 
 ## Files Structure
 
-```
-├── triton_test.py              # 🚀 MAIN TEST SUITE - All 321 operators + detailed tests
-├── categorize_operators.py    # Operator categorization and analysis
-├── setup.py                   # Project setup
-├── README.md                  # This documentation
-├── requirements.txt           # Python dependencies
-├── reports/                   # 📊 Generated test reports (excluded from git)
-├── docker/                    # 🐳 Docker build environment
-│   ├── Dockerfile             # Triton Docker build configuration
-│   ├── docker-compose.yml     # Docker Compose services
-│   ├── build-docker.sh        # Docker image build script
-│   ├── run-docker.sh          # Docker container run script
-│   └── README-Docker.md       # Docker usage guide
-├── docker-build.sh            # Convenience script for Docker build
-├── docker-run.sh              # Convenience script for Docker run
-└── triton/                    # Triton submodule
+```text
+├── triton_test.py             # Main test 
+├── categorize_operators.py    # Operator categorization utility
+├── tests/
+│   ├── rbln_triton/           # Rebellions NPU test cases
+│   ├── test_basic.py
+│   └── test_cuda.py
+├── examples/                  # Basic Triton examples
+├── docker/                    # Docker build and execution files
+├── triton/                    # Upstream Triton submodule
+├── build-local.sh
+├── requirements.txt
+└── setup.py
 ```
 
 ## Features
 
-### Comprehensive Coverage
-- **ALL 321 operators** tested across all Triton modules
-- **triton.language**: 116 operators (core operations, math, tensor manipulation)
+### Runtime API Coverage
+
+Discovers callable APIs from the installed Triton version
+
+- **triton.language**: 124 operators (core operations, math, tensor manipulation)
 - **libdevice**: 197 operators (CUDA math library functions)
 - **extra modules**: 8 operators (CUDA-specific functions)
-- **100% test coverage** of all available operators
-- **Complete categorization** by functionality
 
 ### Device Support
-- **🖥️ CPU Testing**: Runs 93/116 operators (80.2% coverage) with automatic CUDA-only function skipping
-- **🚀 CUDA Testing**: Full 321 operator support with GPU acceleration
-- **🔍 Auto-Detection**: Automatically detects available hardware and adapts testing
-- **📊 Device Reporting**: Clear indication of test environment in results
+
+- **CUDA testing**: Runs `tl`, `libdevice`, and `extra.cuda` tests with real kernel launches
+- **CPU testing**: Runs `tl` tests through a registered Triton CPU backend
+- **Rebellions NPU testing**: Runs seven `rebel.triton` examples through `torch.compile(..., backend="rbln")`
+- **Automatic selection**: Uses CUDA when available and CPU otherwise
+- **Device reporting**: Includes the active device in the generated result summary
 
 ### Triton Source Support
-- **📦 Pip Installation**: Uses system-installed triton package (default)
-- **🔧 Local Build**: Can use locally built triton from `./triton/python` submodule
-- **🔄 Flexible Switching**: Easy switching between pip and local triton builds
-- **✅ Version Detection**: Automatically detects and reports triton version
-- **🔍 Build Status Check**: `--check-build` to diagnose local build issues
+
+- **Installed Triton**: Uses the environment's installed Triton package by default
+- **Local source**: Uses `./triton/python` when `--local-triton` is specified
+- **CPU backend**: Supports `triton-lang/triton-cpu` environments
+- **NPU backend**: Uses `rebel.triton` from `rebel-compiler`
+- **Version detection**: Reports the imported Triton implementation version
+- **Backend checks**: Verifies CPU backend registration and Rebellions backend activation before testing
 
 ### Test Categories
-1. **Framework Tests**: Systematic testing of all operators for availability and basic functionality
-2. **Detailed Tests**: In-depth functional testing of critical operators with real kernels
-3. **Performance Tests**: Execution time measurement and comparison
+
+1. **Execution tests**: Compile and launch real Triton kernels
+2. **Functional tests**: Compare outputs with numeric references or invariants where available
+3. **Performance tests**: Measure execution time and throughput after warmup
 
 ### Execution Modes
-- **Full test suite**: All operators and detailed tests
-- **Module filtering**: Test specific modules (tl, libdevice, extra)
-- **Device selection**: CPU-only, CUDA-only, or auto-detect
-- **Framework only**: Just test operator availability
-- **Detailed only**: Just run functional tests
+
+- **Full suite**: Run all modules supported by the selected device
+- **Module filtering**: Run only `tl`, `libdevice`, or `extra`
+- **Function filtering**: Run selected libdevice wrappers with `--only`
+- **Device selection**: Choose CUDA, CPU, NPU, or automatic detection
+- **Benchmark configuration**: Configure tensor size, block size, warmup, and repetitions
 
 ## Quick Start
 
 ### Prerequisites
-```bash
-pip install torch triton numpy
-```
+
+CUDA testing requires a CUDA-enabled PyTorch installation and a supported NVIDIA GPU. CPU mode requires a Triton CPU backend rather than a standard upstream Triton installation. NPU mode requires rebel-compiler, the Rebellions runtime, and a supported device.
 
 ### Basic Usage
 
-**🚀 MAIN TEST SUITE** - All-in-one testing with CPU/CUDA support:
+**Main test suite** — real execution, functional checks, and performance measurements:
 
 ```bash
-# Test ALL 321 operators (auto-detect device)
+# Run all modules supported by the automatically selected device
 python triton_test.py
 
-# Test specific modules
-python triton_test.py --module tl        # triton.language (116 ops)
-python triton_test.py --module libdevice # libdevice (197 ops)
-python triton_test.py --module extra     # extra modules (8 ops)
+# Run a specific module
+python triton_test.py --module tl
+python triton_test.py --module libdevice
+python triton_test.py --module extra
 
-# Device-specific testing
-python triton_test.py --device cpu       # CPU only (skips CUDA-only functions)
-python triton_test.py --device cuda      # Force CUDA device
-python triton_test.py --device auto      # Auto-detect (default)
+# Select a device explicitly
+python triton_test.py --device cpu
+python triton_test.py --device cuda
+python triton_test.py --device npu
+python triton_test.py --device auto 
 
-# Triton source selection
-python triton_test.py --local-triton     # Use local triton build (./triton/python)
-python triton_test.py                    # Use pip-installed triton (default)
-python triton_test.py --check-build      # Check local triton build status
+# Use the local Triton source under ./triton/python
+python triton_test.py --local-triton --device cuda
 
-# Run detailed functional tests (requires CUDA)
-python triton_test.py --detailed
-
-# List available options
+# List available modules
 python triton_test.py --list
 ```
 
-### CPU vs CUDA Testing
+### CPU vs CUDA vs NPU Testing
 
-The test suite automatically detects your environment and adapts accordingly:
+The test suite adapts its behavior to the selected backend:
 
-| Device | Total Operators | Passed | Skipped | Notes |
-|--------|-----------------|--------|---------|-------|
-| **CPU** | 116 (tl module) | 93 | 23 | CUDA-only functions skipped |
-| **CUDA** | 116 (tl module) | 116 | 0 | All operators available |
+| Device | Test Scope | Requirements | Notes |
+|---|---|---|---|
+| **CPU** | `tl` only | Registered Triton CPU backend | Skips `libdevice` and `extra.cuda` |
+| **CUDA** | `tl`, `libdevice`, and `extra.cuda` | CUDA-enabled PyTorch and NVIDIA GPU | Provides the complete operator suite |
+| **NPU** | Seven RBLN integration examples | Active `rebel` backend and Rebellions runtime | Uses `rebel.triton`, not upstream Triton |
 
-**CUDA-only functions include**:
-- Atomic operations (atomic_add, atomic_cas, etc.)
-- Memory operations (load, store, make_block_ptr, etc.)
-- GPU program model (program_id, num_programs, etc.)
-- Reduction operations (reduce, sum, max, min, etc.)
+CPU mode verifies backend registration before running:
 
-**Analysis tools**:
 ```bash
-# Categorize and analyze all operators
+TRITON_CPU_BACKEND=1 python triton_test.py --device cpu
+```
+
+NPU mode runs these examples from `tests/rbln_triton/`:
+
+- Rank-3 vector addition
+- Fused softmax
+- Matrix multiplication
+- Layer normalization
+- Flash attention
+- Exponential math function
+- Block-scaled matrix multiplication
+
+Use a custom NPU example directory when necessary:
+
+```bash
+RBLN_TRITON_EXAMPLES_DIR=/path/to/rbln_triton python triton_test.py --device npu
+```
+
+**Analysis tools:**
+
+```bash
+# Categorize APIs exported by the installed Triton version
 python categorize_operators.py
 
-# List available operators and modules
+# List available execution modules
 python triton_test.py --list
 ```
 
-## Complete Operator Categories (321 Total)
+## Complete Operator Categories (329 Total)
 
-### 📚 TRITON.LANGUAGE (116 operators)
+### TRITON.LANGUAGE (124 operators)
 
-| Category | Count | Examples |
-|----------|-------|----------|
-| **Tensor Manipulation** | 15 | `broadcast`, `reshape`, `view`, `cat`, `split`, `permute` |
-| **Math Functions** | 14 | `exp`, `log`, `sin`, `cos`, `sqrt`, `sigmoid`, `softmax` |
-| **Reduction Operations** | 12 | `reduce`, `sum`, `max`, `min`, `argmax`, `cumsum` |
-| **Arithmetic Operations** | 11 | `add`, `cast`, `maximum`, `minimum`, `clamp`, `where` |
-| **Data Types** | 10 | `dtype`, `block_type`, `pointer_type`, `tensor` |
-| **Random Number Generation** | 10 | `rand`, `randn`, `randint`, `philox` |
-| **Advanced/Specialized** | 10 | `dot`, `dot_scaled`, `sort`, `topk`, `bitonic_merge` |
-| **Memory Operations** | 8 | `load`, `store`, `make_block_ptr`, `tensor_descriptor` |
-| **Atomic Operations** | 8 | `atomic_add`, `atomic_cas`, `atomic_max`, `atomic_min` |
-| **Tensor Creation** | 6 | `arange`, `full`, `zeros`, `zeros_like` |
-| **Other categories** | 12 | Debugging, compiler hints, program model, control flow |
+| Category | Examples |
+|---|---|
+| **Unary and binary operations** | `exp`, `log`, `sin`, comparisons, arithmetic |
+| **Reduction and scan operations** | `sum`, `max`, `argmax`, `cumsum` |
+| **Memory operations** | `load`, `store`, block pointers |
+| **Tensor descriptors** | descriptor creation, load, and store |
+| **Shape and layout operations** | `reshape`, `broadcast`, `join`, `split` |
+| **Random operations** | `rand`, `randn`, `randint` |
+| **Atomic operations** | `atomic_add`, `atomic_cas`, `atomic_max` |
+| **Matrix operations** | `dot` and related matrix primitives |
+| **Program and compiler helpers** | program IDs, hints, and control helpers |
 
-### 🧮 LIBDEVICE (197 operators)
+Executable tensor operations use shared functional and performance smoke kernels. Type/meta helpers or operations requiring separate integration coverage may be marked SKIP.
 
-| Category | Count | Examples |
-|----------|-------|----------|
-| **Type Conversions** | 65 | `float2int_rn`, `double2float_rd`, `int2double_rn` |
-| **Arithmetic with Rounding** | 29 | `add_rn`, `mul_rd`, `div_ru`, `fma_rz`, `sqrt_rn` |
-| **Trigonometric** | 19 | `sin`, `cos`, `tan`, `asin`, `sinh`, `tanh` |
-| **Exponential/Logarithmic** | 16 | `exp`, `log`, `exp2`, `log10`, `expm1`, `log1p` |
-| **Basic Math** | 12 | `abs`, `floor`, `ceil`, `round`, `trunc`, `fmod` |
-| **Bessel Functions** | 8 | `j0`, `j1`, `jn`, `y0`, `y1`, `cyl_bessel_i0` |
-| **Special Functions** | 7 | `isnan`, `isinf`, `signbit`, `copysign`, `nextafter` |
-| **Error Functions** | 7 | `erf`, `erfc`, `erfcinv`, `normcdf`, `erfinv` |
-| **Other categories** | 34 | Bit manipulation, bitcast, square root, gamma, utility |
+### LIBDEVICE (197 operators)
 
-### ⚡ EXTRA MODULES (8 operators)
+| Category | Examples |
+|---|---|
+| **Type conversions** | float, double, and integer conversions with rounding modes |
+| **Rounded arithmetic** | `add_rn`, `mul_rd`, `div_ru`, `fma_rz` |
+| **Trigonometric functions** | `sin`, `cos`, `tan`, `asin`, `tanh` |
+| **Exponential and logarithmic functions** | `exp`, `log`, `exp2`, `log10` |
+| **Basic math functions** | `abs`, `floor`, `ceil`, `round`, `fmod` |
+| **Special functions** | error, Bessel, gamma, and classification functions |
+| **Integer and bit operations** | `clz`, `popc`, `brev`, `mulhi` |
 
-| Category | Count | Examples |
-|----------|-------|----------|
-| **CUDA Specific** | 8 | `globaltimer`, `num_warps`, `num_threads`, `smid` |
+Wrappers with a local reference formula receive an accuracy result. Other successfully executed wrappers are reported with `accuracy=N/A` and `ref=smoke_only`.
+
+### EXTRA MODULES (8 operators)
+
+| Category | Examples |
+|---|---|
+| **CUDA value intrinsics** | `globaltimer`, `smid`, `num_threads`, `num_warps` |
+| **GDC intrinsics** | `gdc_wait`, `gdc_launch_dependents` |
+| **Custom float8 conversions** | SM70 and SM80 conversion wrappers |
 
 ## Output and Reporting
 
 ### Text Reports
-Detailed human-readable reports with:
-- Summary statistics (pass/fail/error/skip counts)
-- Device information (CPU vs CUDA)
-- Category breakdown
-- Failed test details with error messages
-- Execution timing
 
-All reports are automatically saved to the `reports/` directory:
-- `reports/all_321_operators_report.txt` - Complete test results
-- `reports/tl_operators_report.txt` - triton.language specific results
-- `reports/detailed_operator_categorization.txt` - Operator analysis
+Reports include:
+
+- PASS, FAIL, ERROR, and SKIP totals
+- Separate compile/launch (`exec`) and correctness (`accuracy`) statuses
+- Device and Triton version information
+- Callable API availability counts
+- Module-level result breakdowns
+- Per-test dtype, mode, execution time, and throughput
+- Failure, error, and skip details
+
+Full `--module all` runs are saved to:
+
+```text
+reports/report_all_operators.txt
+```
+
+Module-only runs print the report to the console without saving a file. The process exits with status 1 when any test produces FAIL or ERROR.
 
 ### Example Output
 
-**Complete 321-operator test (CUDA):**
-```
-🎉 ALL 321 OPERATORS PASSED! 🎉
-
-BREAKDOWN BY MODULE:
--------------------
-tl              116 tests | 116 passed (100.0%)
-libdevice       197 tests | 197 passed (100.0%)
-cuda              8 tests |   8 passed (100.0%)
-```
-
-**CPU-only test example:**
-```
-📈 93/116 triton.language operators passed (80.2%)
-
-BREAKDOWN BY MODULE:
--------------------
-tl              116 tests |  93 passed ( 80.2%)
-
-Device(s): CPU
+```text
+SUMMARY:
+--------
+Total Tests:  <runtime-dependent>
+Passed:       <count>
+Failed:       <count>
+Errors:       <count>
+Skipped:      <count>
+Execution:    <passed> passed | <failed> failed
+Accuracy:     <passed> passed | <failed> failed | <n/a> n/a
+Device(s):    CUDA (<device name>)
+Triton:       <installed version>
 ```
 
-**Original framework output:**
-```
-TRITON OPERATOR TEST REPORT
-========================================
-
-Total Tests: 57
-Passed:     57 (100.0%)
-Failed:     0 (0.0%)
-Errors:     0 (0.0%)
-Skipped:    0 (0.0%)
-
-Total Execution Time: 0.29s
-```
-
-## Advanced Usage
-
-### Custom Test Development
-Add new detailed tests in `test_operators.py`:
-
-```python
-def test_my_operator():
-    @triton.jit
-    def my_kernel(input_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-        # Your kernel implementation
-        pass
-
-    # Test setup and verification
-    return torch.allclose(output, expected)
-
-# Register the test
-OPERATOR_TESTS['my_operator'] = test_my_operator
-```
-
-### CI Integration
-For continuous integration:
-
-```bash
-# Complete operator availability test (auto-detect device)
-python triton_test.py
-
-# Test specific modules for faster CI
-python triton_test.py --module tl
-python triton_test.py --module libdevice
-
-# CPU-only testing for environments without CUDA
-python triton_test.py --device cpu
-
-# CUDA testing in GPU-enabled CI
-python triton_test.py --device cuda
-
-# Detailed functional tests (requires CUDA)
-python triton_test.py --detailed
-
-# Generate operator analysis
-python categorize_operators.py
-```
+`accuracy=N/A` means execution succeeded but no numeric reference was available, or the test only checked a limited invariant.
 
 ## Setup
 
-1. Clone this repository with submodules:
+Clone the repository:
+
 ```bash
-git clone --recursive <your-repo-url>
+git clone <repository-url>
+cd lowlevel-api-test
 ```
 
-Or if already cloned, initialize submodules:
+### Installed Triton (CUDA)
+
+To run with an installed Triton package:
+
+```bash
+pip install -r requirements.txt
+pip install triton
+```
+
+Then run the CUDA tests as described in [Basic Usage](#basic-usage).
+
+### Local Triton Source
+
+Initialize the Triton submodule only when building or using the local source:
+
 ```bash
 git submodule update --init --recursive
 ```
 
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-3. (Optional) Build local triton:
-
-**Option A: Automatic build script (Recommended)**
-```bash
-# Automated local build with virtual environment
-./build-local.sh
-
-# Then activate and test
-source venv/bin/activate
-python triton_test.py --local-triton
-```
-
-**Option B: Manual build**
-```bash
-# Manual setup
-cd triton
-pip install -e python
-python setup.py build_ext --inplace
-cd ..
-
-# Then use with --local-triton flag
-python triton_test.py --local-triton
-```
-
-### Local Triton Build Requirements
-- CMake >= 3.18
-- LLVM (for compilation)
-- CUDA Toolkit (for GPU support)
-- Python development headers
-
-For detailed build instructions, see the [Triton documentation](https://triton-lang.org/main/getting-started/installation.html#building-from-source).
-
-### Docker Build (Recommended)
-For a consistent build environment, use Docker:
+After building the local source, run:
 
 ```bash
-# Build Docker image
-./docker-build.sh
-
-# Run tests in Docker
-./docker-run.sh test
-
-# Start development environment
-./docker-run.sh dev
-
-# Start Jupyter Lab
-./docker-run.sh jupyter
+python triton_test.py --local-triton --device cuda
 ```
 
-See `docker/README-Docker.md` for detailed Docker usage instructions.
+CPU and NPU testing require their respective backend environments. The Docker setup below provides the repository's backend-specific build paths.
+
+### Docker Build
+
+The Dockerfile supports three build modes:
+
+- `cuda`: upstream Triton from the submodule
+- `cpu`: `triton-lang/triton-cpu`
+- `npu`: vendored `rebel.triton` and Rebellions runtime libraries
+
+The provided build script detects the host CUDA environment and builds a CUDA or CPU image:
+
+```bash
+./docker/build-docker.sh
+./docker/run-docker.sh test
+```
+
+The runner also provides development and explicit device commands:
+
+```bash
+./docker/run-docker.sh test-cuda
+./docker/run-docker.sh test-cpu
+./docker/run-docker.sh dev
+./docker/run-docker.sh bash
+./docker/run-docker.sh jupyter
+```
+
+The selected test command must match the image build mode. For example, `test-cpu` requires a CPU image containing `triton-cpu`; it does not convert a CUDA image into a CPU image.
+
+NPU images are not built by `build-docker.sh`. They require a separate `BUILD_MODE=npu` build with the vendor runtime and `rebel-compiler` packages staged under `docker/rbln-runtime/`. The NPU runner also requires access to the Rebellions device nodes and daemon socket. Once that environment and image are prepared, run:
+
+```bash
+./docker/run-docker.sh test-npu
+```
 
 ## Architecture
 
-### Unified Testing System
-1. **Single Entry Point**: `test_all_338_operators.py` handles all testing needs
-2. **Multiple Testing Modes**:
-   - **Availability Testing**: Tests all 321 operators for import/access
-   - **Module-specific Testing**: Test individual modules (tl, libdevice, extra)
-   - **Detailed Functional Testing**: In-depth kernel execution tests
-3. **Categorization System**: Systematic classification by functionality
-4. **Comprehensive Reporting**: Detailed reports with breakdowns by module
+`triton_test.py` is the main entry point and uses a backend-specific flow:
 
-### Test Framework Design
-1. **Operator Discovery**: Runtime introspection of Triton modules
-2. **Test Registration**: Dynamic test case creation with metadata
-3. **Execution Engine**: Parallel test execution with error handling
-4. **Result Collection**: Structured result storage and aggregation
-5. **Reporting**: Multiple output formats for different use cases
+1. Import the installed Triton implementation or the local source selected by `--local-triton`.
+2. Select the requested device and verify the required backend.
+3. Discover callable APIs from `tl`, `libdevice`, and `extra.cuda` at runtime.
+4. Compile and execute the supported operations, validate results where a reference is available, and collect performance measurements.
+5. Print a shared result summary and save a text report for `--module all` runs.
+
+CPU mode verifies the Triton CPU backend and runs `tl` tests only. NPU mode follows a separate path: it verifies the `rebel` backend and runs the examples under `tests/rbln_triton/` as subprocesses instead of producing the standard operator report.
 
 ### Error Handling
-- **Graceful degradation**: Individual test failures don't stop execution
-- **Detailed diagnostics**: Full stack traces for debugging
-- **Categorized failures**: Distinguish between missing functions, compilation errors, and runtime failures
 
-### Extensibility
-- **Pluggable tests**: Easy addition of new test categories
-- **Configurable execution**: Multiple execution modes and filters
-- **Custom operators**: Support for testing user-defined operators
+- Individual failures are collected instead of stopping the suite immediately
+- FAIL, ERROR, and SKIP have distinct meanings
+- Compilation/launch status is reported separately from numeric accuracy
+- Backend capability errors are reported before unsupported tests begin
+- The command exits with status 1 if any collected result is FAIL or ERROR
 
 ## Common Issues and Solutions
 
 ### CUDA Not Available
+
+```text
+CUDA is not available.
 ```
-❌ CUDA not available. Some tests will be skipped.
+
+**Solution:** Install a CUDA-enabled PyTorch build, verify the NVIDIA driver and device access, or use a configured CPU backend with `--device cpu`.
+
+### CPU Backend Not Registered
+
+```text
+CPU device requested, but Triton CPU backend is not registered.
 ```
-**Solution**: Install CUDA-capable PyTorch and ensure GPU access.
 
-### Memory Issues
+**Solution:** Install or build `triton-lang/triton-cpu`, then run with `TRITON_CPU_BACKEND=1`.
+
+### Rebellions Backend Not Active
+
+```text
+The rebel backend is installed but inactive.
 ```
-CUDA out of memory
+
+**Solution:** Verify the NPU device, driver, runtime libraries, and Docker device mounts.
+
+### Triton Import Error
+
+```text
+Failed to import Triton
 ```
-**Solution**: Use `--category` to test smaller subsets or reduce test data sizes.
 
-### Import Errors
-```
-ImportError: No module named 'triton'
-```
-**Solution**: Install Triton: `pip install triton`
+**Solution:** Install the correct Triton implementation for the selected backend, or use `--local-triton` after building the local source.
 
-## Test Results Summary
+### Tensor Descriptor Tests Are Skipped
 
-**🎉 ALL 321 OPERATORS - 100% SUCCESS RATE 🎉**
+Tensor descriptor operations require Hopper (`sm90+`). Skips on older GPU architectures are expected.
 
-- ✅ **triton.language**: 116/116 operators passed
-- ✅ **libdevice**: 197/197 operators passed
-- ✅ **extra.cuda**: 8/8 operators passed
-- ⚡ **Total execution time**: < 1 second
-- 🏆 **Zero failures or errors**
+### Libdevice Count Warning
 
-This comprehensive test suite validates that:
-- All Triton operators are properly accessible
-- No import or availability issues exist
-- The complete Triton ecosystem is functional
-
-## Contributing
-
-1. **Add new operators**: Update the operator lists or use automatic discovery
-2. **Improve tests**: Enhance test coverage in `test_operators.py`
-3. **Fix issues**: Address failing tests or improve error handling
-4. **Documentation**: Update this README for new features
-5. **Analysis**: Use `categorize_operators.py` to analyze new operator additions
+Triton versions may export different wrapper counts. `--expect-libdevice-count` only controls the expected-count warning; runtime discovery still determines the actual test set.
