@@ -12,6 +12,8 @@ ARG CUDA_VERSION=12.8
 ARG CUDA_ARCHITECTURE=sm_120
 ARG PYTORCH_CUDA_VERSION=cu128
 ARG NPU_PIP_PACKAGES=
+# Last triton-cpu revision verified by a successful full CPU image build/test run.
+ARG TRITON_CPU_REF=6ca45149d5b622f1d0c91f0ecf5000eb8224f489
 ARG RBLN_COMPILER_VERSION=0.10.0   # +++ NPU: rebel-compiler (KMD 3.0.0 -> 0.10.x)
 
 # Set environment variables
@@ -81,6 +83,7 @@ RUN if [ "$BUILD_MODE" = "cpu" ]; then \
         echo "Cloning triton-cpu source for CPU backend..." && \
         git clone https://github.com/triton-lang/triton-cpu.git /opt/triton-src && \
         cd /opt/triton-src && \
+        git checkout "$TRITON_CPU_REF" && \
         git submodule update --init --recursive; \
     else \
         cp -r /workspace/triton /opt/triton-src; \
@@ -118,6 +121,7 @@ RUN if [ "$BUILD_MODE" = "npu" ]; then \
 # +++ NPU: bake librbln user-space libs AND the vendored rebel-compiler packages.
 COPY docker/rbln-runtime/ /opt/rbln-lib/
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
+        cp -a /opt/rbln-lib/rbln-smi /opt/rbln-lib/rbln-stat /usr/local/bin/ && \
         cp -a /opt/rbln-lib/librbln-*.so* /usr/lib/ && ldconfig && \
         cp -a /opt/rbln-lib/rebel /opt/rbln-lib/tvm /opt/rbln-lib/rebel_compiler.libs \
               /opt/rbln-lib/rebel_compiler-*.dist-info \
@@ -164,11 +168,11 @@ RUN if [ "$BUILD_MODE" != "npu" ]; then \
 
 # Verify the build artifacts/backend registration for the selected build mode.
 RUN if [ "$BUILD_MODE" = "cuda" ]; then \
-        ls -la /opt/triton-src/python/triton/_C/ || echo "Build artifacts verification failed"; \
+        /opt/triton-venv/bin/python -c "import triton; from triton.backends import backends; ks=sorted(backends); print('Triton backends:', ks); assert 'nvidia' in ks, 'NVIDIA Triton backend not registered in the image'; print('OK: NVIDIA Triton backend present')"; \
     elif [ "$BUILD_MODE" = "npu" ]; then \
         /opt/triton-venv/bin/python -c "import rebel; print('rebel-compiler', rebel.__version__); from rebel.triton.backends import backends; ks=sorted(backends); print('rebel.triton backends:', ks); assert any(k.lower()=='rebel' for k in ks), 'rebel Triton backend not registered in the image'; print('OK: rebel Triton backend present')"; \
     elif [ "$BUILD_MODE" = "cpu" ]; then \
-        TRITON_CPU_BACKEND=1 /opt/triton-venv/bin/python -c "import triton; print('OK: triton-cpu import works')"; \
+        TRITON_CPU_BACKEND=1 /opt/triton-venv/bin/python -c "import triton; from triton.backends import backends; ks=sorted(backends); print('Triton backends:', ks); assert 'cpu' in ks, 'CPU Triton backend not registered in the image'; print('OK: CPU Triton backend present')"; \
     fi
 
 # Set default environment

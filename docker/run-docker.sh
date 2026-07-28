@@ -5,6 +5,8 @@
 
 set -e
 
+DOCKER_IMAGE_REF="${DOCKER_IMAGE_LOCAL:-triton-local-build}:${DOCKER_IMAGE_TAG:-latest}"
+
 # Function to show usage
 show_usage() {
     echo "Usage: $0 [COMMAND]"
@@ -13,6 +15,7 @@ show_usage() {
     echo "  test        - Run Triton tests with local build"
     echo "  test-cpu    - Run tests on CPU only"
     echo "  test-cuda   - Run tests on CUDA"
+    echo "  test-npu    - Run tests on Rebellions NPU"
     echo "  test-detailed - Run detailed functional tests"
     echo "  dev         - Start development container with interactive shell"
     echo "  jupyter     - Start Jupyter Lab server"
@@ -34,116 +37,54 @@ check_docker() {
     fi
 }
 
-# Check if image exists
+# Check if the selected image exists.
 check_image() {
-    if ! docker image inspect triton-local-build:latest > /dev/null 2>&1; then
-        echo "❌ Docker image 'triton-local-build:latest' not found."
-        echo "Please run './build-docker.sh' first to build the image."
+    if ! docker image inspect "$DOCKER_IMAGE_REF" > /dev/null 2>&1; then
+        echo "❌ Docker image '$DOCKER_IMAGE_REF' not found."
+        echo "Please build the matching device image first."
         exit 1
     fi
 }
 
-# Check and build Triton if needed
-ensure_triton_build() {
-    echo "🔍 Checking Triton build status..."
-    
-    # Test if Triton can be imported in the container (using the pre-built version in /opt/triton-src)
-    if docker run --rm triton-local-build:latest /opt/triton-venv/bin/python -c "import triton; print('Triton is ready')" > /dev/null 2>&1; then
-        echo "✅ Triton is pre-built in the Docker image"
-    else
-        echo "⚠️  Triton not found or corrupted in Docker image"
-        echo "🔄 Building Triton inside container..."
-        
-        # Build Triton inside the container using the /opt/triton-src location
-        docker run --rm \
-            -v "$(pwd)":/workspace \
-            -w /workspace \
-            triton-local-build:latest \
-            bash -c "
-                echo '🔧 Setting up Triton build environment...'
-                cd /opt/triton-src
-                
-                # Detect GPU architecture if CUDA is available
-                if command -v nvidia-smi &> /dev/null; then
-                    GPU_NAME=\$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
-                    echo \"🎮 Detected GPU: \$GPU_NAME\"
-                    
-                    case \"\$GPU_NAME\" in
-                        *\"Blackwell\"*|*\"RTX PRO 6000\"*)
-                            CUDA_ARCH=\"sm_120\"
-                            echo \"🏗️  Using CUDA architecture: \$CUDA_ARCH (Blackwell)\"
-                            ;;
-                        *\"Hopper\"*|*\"H100\"*)
-                            CUDA_ARCH=\"sm_90\"
-                            echo \"🏗️  Using CUDA architecture: \$CUDA_ARCH (Hopper)\"
-                            ;;
-                        *\"Ampere\"*|*\"A100\"*|*\"RTX 30\"*|*\"RTX 40\"*)
-                            CUDA_ARCH=\"sm_80\"
-                            echo \"🏗️  Using CUDA architecture: \$CUDA_ARCH (Ampere)\"
-                            ;;
-                        *)
-                            CUDA_ARCH=\"sm_80\"
-                            echo \"🏗️  Unknown GPU, using default CUDA architecture: \$CUDA_ARCH\"
-                            ;;
-                    esac
-                    
-                    export TRITON_CUDA_ARCHITECTURES=\"\$CUDA_ARCH\"
-                    export TORCH_CUDA_ARCH_LIST=\"\$CUDA_ARCH\"
-                    echo \"🚀 Building Triton with CUDA architecture: \$CUDA_ARCH\"
-                else
-                    echo \"🖥️  No GPU detected, building for CPU-only\"
-                fi
-                
-                # Install Triton in development mode
-                echo '📦 Installing Triton in development mode...'
-                /opt/triton-venv/bin/pip install -e .
-                
-                # Build extensions
-                echo '🔨 Building Triton extensions...'
-                /opt/triton-venv/bin/python setup.py build_ext --inplace
-                
-                echo '✅ Triton build completed successfully!'
-            "
-        
-        echo "✅ Triton build completed"
-    fi
+sync_test_sources() {
+    echo ">>> Copying current Triton test sources to container..."
+    docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
+    docker exec "$CONTAINER_NAME" rm -rf /workspace/triton_tests
+    docker cp triton_tests "$CONTAINER_NAME:/workspace/triton_tests"
+}
+
+sync_npu_examples() {
+    echo ">>> Copying current NPU integration examples to container..."
+    docker exec "$CONTAINER_NAME" rm -rf /workspace/tests
+    docker cp tests "$CONTAINER_NAME:/workspace/tests"
 }
 
 # Run tests
-# run_test() {
-#     local device=${1:-"auto"}
-#     echo "🧪 Running Triton tests with local build (device: $device)..."
-    
-#     # Ensure Triton is built
-#     ensure_triton_build
-    
-#     # Check if NVIDIA runtime is available
-#     if docker info | grep -q "nvidia"; then
-#         echo "🚀 Using NVIDIA runtime with CUDA..."
-#         docker run --rm \
-#             --runtime=nvidia \
-#             --gpus all \
-#             -v "$(pwd)":/workspace/low_api_test \
-#             -w /workspace \
-#             -e TRITON_BACKENDS_IN_TREE=1 \
-#             triton-local-build:latest \
-#             /opt/triton-venv/bin/python triton_test.py --local-triton --device cuda
-#     else
-#         echo "🖥️  NVIDIA runtime not available, running without GPU support..."
-#         docker run --rm \
-#             -v "$(pwd)":/workspace/low_api_test \
-#             -w /workspace \
-#             -e TRITON_BACKENDS_IN_TREE=1 \
-#             triton-local-build:latest \
-#             /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
-#     fi
-# }
 run_test() {
     local device=${1:-"auto"}
     echo "🧪 Running Triton tests with local build (device: $device)..."
+
+    if [ "$device" = "auto" ]; then
+        case "${DOCKER_IMAGE_TAG:-}" in
+            npu-latest)
+                device="npu"
+                ;;
+            gpu-latest)
+                device="cuda"
+                ;;
+            cpu-latest)
+                device="cpu"
+                ;;
+            *)
+                if docker info | grep -q "nvidia"; then
+                    device="cuda"
+                else
+                    device="cpu"
+                fi
+                ;;
+        esac
+    fi
     
-    # Ensure Triton is built
-    ensure_triton_build
     
     # Generate unique container name
     CONTAINER_NAME="triton-test-$$-$(date +%s)"
@@ -159,7 +100,7 @@ run_test() {
     
     echo ">>> Creating temporary container: $CONTAINER_NAME"
     
-    if [ "$device" = "npu" ] || [ "${DOCKER_IMAGE_TAG:-}" = "npu-latest" ]; then
+    if [ "$device" = "npu" ]; then
         echo "🧠 Using NPU container runtime access..."
 
         # NPU device nodes and vendor runtime libraries are environment-specific.
@@ -171,24 +112,18 @@ run_test() {
             ${NPU_DOCKER_ARGS:-} \
             -w /workspace \
             -e PYTHONPATH="" \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             sleep 300
 
-        echo ">>> Copying triton_test.py to container..."
-        docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
-
-        echo ">>> Copying tests to container..."
-        docker exec "$CONTAINER_NAME" mkdir -p /workspace/tests
-        docker cp tests/. "$CONTAINER_NAME:/workspace/tests/"
+        sync_test_sources
+        sync_npu_examples
 
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
             /opt/triton-venv/bin/python triton_test.py --device npu
 
-    # CPU images should skip CUDA-only execution tests. Other images keep
-    # the existing NVIDIA runtime detection behavior.
-    elif [ "$device" != "cpu" ] && [ "${DOCKER_IMAGE_TAG:-}" != "cpu-latest" ] && docker info | grep -q "nvidia"; then
+    elif [ "$device" = "cuda" ]; then
         echo "🚀 Using NVIDIA runtime with CUDA..."
 
         # Start container in background
@@ -198,12 +133,10 @@ run_test() {
             -w /workspace \
             -e TRITON_BACKENDS_IN_TREE=1 \
             -e PYTHONPATH="" \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             sleep 300 
 
-        # Copy triton_test.py into container
-        echo ">>> Copying triton_test.py to container..."
-        docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
+        sync_test_sources
 
         # Execute test
         echo ">>> Running tests..."
@@ -218,12 +151,10 @@ run_test() {
             -w /workspace \
             -e TRITON_CPU_BACKEND=1 \
             -e PYTHONPATH="" \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             sleep 300
 
-        # Copy triton_test.py into container
-        echo ">>> Copying triton_test.py to container..."
-        docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
+        sync_test_sources
 
         # Execute test
         echo ">>> Running tests..."
@@ -257,8 +188,6 @@ run_test_npu() {
 run_test_detailed() {
     echo "🔍 Running detailed tests..."
     
-    # Ensure Triton is built
-    ensure_triton_build
     
     # Check if NVIDIA runtime is available
     if docker info | grep -q "nvidia"; then
@@ -269,7 +198,7 @@ run_test_detailed() {
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
             -e TRITON_BACKENDS_IN_TREE=1 \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             /opt/triton-venv/bin/python triton_test.py --local-triton --detailed
     else
         echo "🖥️  NVIDIA runtime not available, running CPU-only tests..."
@@ -277,7 +206,7 @@ run_test_detailed() {
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
             -e TRITON_BACKENDS_IN_TREE=1 \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
     fi
 }
@@ -294,14 +223,14 @@ run_dev() {
             --gpus all \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             bash
     else
         echo "🖥️  NVIDIA runtime not available, starting without GPU support..."
         docker run -it --rm \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             bash
     fi
 }
@@ -319,7 +248,7 @@ run_jupyter() {
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
             -p 8888:8888 \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             bash -c "/opt/triton-venv/bin/pip install jupyter && /opt/triton-venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
     else
         echo "🖥️  NVIDIA runtime not available, starting without GPU support..."
@@ -327,7 +256,7 @@ run_jupyter() {
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
             -p 8888:8888 \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             bash -c "/opt/triton-venv/bin/pip install jupyter && /opt/triton-venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
     fi
 }
@@ -344,14 +273,14 @@ run_bash() {
             --gpus all \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             bash -c "source /opt/triton-venv/bin/activate && bash"
     else
         echo "🖥️  NVIDIA runtime not available, starting without GPU support..."
         docker run -it --rm \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
-            triton-local-build:latest \
+            "$DOCKER_IMAGE_REF" \
             bash -c "source /opt/triton-venv/bin/activate && bash"
     fi
 }
@@ -368,7 +297,7 @@ clean_docker() {
 # Show logs
 show_logs() {
     echo "📋 Showing container logs..."
-    docker logs $(docker ps -q --filter ancestor=triton-local-build:latest) 2>/dev/null || echo "No running containers found."
+    docker logs $(docker ps -q --filter "ancestor=$DOCKER_IMAGE_REF") 2>/dev/null || echo "No running containers found."
 }
 
 # Main script logic

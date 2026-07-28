@@ -15,7 +15,17 @@ This test suite systematically tests every operator defined in the Triton langua
 ## Files Structure
 
 ```text
-├── triton_test.py             # Main test 
+├── triton_test.py             # CLI entry point and device dispatcher
+├── triton_tests/
+│   ├── common.py              # Shared results and execution helpers
+│   ├── report.py              # Shared report generation
+│   └── tests/
+│       ├── cuda.py            # CUDA setup and test entry
+│       ├── cpu.py             # CPU setup and test entry
+│       ├── npu.py             # NPU setup, discovery, and test entry
+│       ├── triton_language.py # Shared CUDA/CPU tl operator cases
+│       ├── cuda_libdevice.py  # CUDA libdevice tests
+│       └── cuda_extra.py      # CUDA extra tests
 ├── categorize_operators.py    # Operator categorization utility
 ├── tests/
 │   ├── rbln_triton/           # Rebellions NPU test cases
@@ -295,7 +305,11 @@ NPU images are not built by `build-docker.sh`. They require a separate `BUILD_MO
 
 ## Architecture
 
-`triton_test.py` is the main entry point and uses a backend-specific flow:
+`triton_test.py` parses CLI requests and dispatches them to the CUDA, CPU, or
+NPU flow under `triton_tests/tests/`. Each device file contains its Triton
+setup, capability checks, device discovery, and test dispatch. CUDA and CPU
+share the operator implementations in `tests/triton_language.py`, while
+CUDA-only extensions stay in their own files.
 
 1. Import the installed Triton implementation or the local source selected by `--local-triton`.
 2. Select the requested device and verify the required backend.

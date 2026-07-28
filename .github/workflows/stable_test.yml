@@ -145,39 +145,40 @@ jobs:
           set -euo pipefail
           echo ">>> Detecting environment..."
 
-          {
-            echo "BUILD_MODE=cpu"
-            echo "CUDA_VERSION=none"
-            echo "CUDA_ARCHITECTURE=none"
-            echo "PYTORCH_CUDA_VERSION=cpu"
-          } > "$BUILD_ARGS"
-
-          if command -v nvidia-smi >/dev/null 2>&1; then
-            {
-              echo "BUILD_MODE=cuda"
-              echo "CUDA_VERSION=12.8"
-
-              GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
-              case "$GPU_NAME" in
-                *"Blackwell"*|*"RTX PRO 6000"*)
-                  echo "CUDA_ARCHITECTURE=sm_120"
-                  echo "PYTORCH_CUDA_VERSION=cu128"
-                  ;;
-                *"Hopper"*|*"H100"*)
-                  echo "CUDA_ARCHITECTURE=sm_90"
-                  echo "PYTORCH_CUDA_VERSION=cu121"
-                  ;;
-                *"Ampere"*|*"A100"*|*"RTX 30"*|*"RTX 40"*)
-                  echo "CUDA_ARCHITECTURE=sm_80"
-                  echo "PYTORCH_CUDA_VERSION=cu121"
-                  ;;
-                *)
-                  echo "CUDA_ARCHITECTURE=sm_80"
-                  echo "PYTORCH_CUDA_VERSION=cu121"
-                  ;;
-              esac
-            } > "$BUILD_ARGS"
+          if ! command -v nvidia-smi >/dev/null 2>&1; then
+            echo "::error::gpu-runner does not provide nvidia-smi; refusing to build a CPU image as gpu-latest."
+            exit 1
           fi
+
+          GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
+          if [ -z "$GPU_NAME" ]; then
+            echo "::error::No NVIDIA GPU was detected on gpu-runner."
+            exit 1
+          fi
+
+          {
+            echo "BUILD_MODE=cuda"
+            echo "CUDA_VERSION=12.8"
+
+            case "$GPU_NAME" in
+              *"Blackwell"*|*"RTX PRO 6000"*)
+                echo "CUDA_ARCHITECTURE=sm_120"
+                echo "PYTORCH_CUDA_VERSION=cu128"
+                ;;
+              *"Hopper"*|*"H100"*)
+                echo "CUDA_ARCHITECTURE=sm_90"
+                echo "PYTORCH_CUDA_VERSION=cu121"
+                ;;
+              *"Ampere"*|*"A100"*|*"RTX 30"*|*"RTX 40"*)
+                echo "CUDA_ARCHITECTURE=sm_80"
+                echo "PYTORCH_CUDA_VERSION=cu121"
+                ;;
+              *)
+                echo "CUDA_ARCHITECTURE=sm_80"
+                echo "PYTORCH_CUDA_VERSION=cu121"
+                ;;
+            esac
+          } > "$BUILD_ARGS"
 
           cat "$BUILD_ARGS"
           {
@@ -330,6 +331,7 @@ jobs:
           set -euo pipefail
           SP=/usr/local/lib/python3.10/dist-packages
           rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
+          cp -a /usr/bin/rbln-smi /usr/bin/rbln-stat docker/rbln-runtime/
           cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
           cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "$SP"/rebel_compiler-*.dist-info \
                 docker/rbln-runtime/
@@ -376,15 +378,11 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
-            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
-          else
+          if ! docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test
+          sh docker/run-docker.sh test-cpu
 
   test-gpu:
     name: Test GPU Image
@@ -406,15 +404,11 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
-            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
-          else
+          if ! docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test
+          sh docker/run-docker.sh test-cuda
 
   test-npu:
     name: Test NPU Image
@@ -440,9 +434,7 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          else
+          if ! docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             echo "::error::Missing NPU image ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Refusing to run NPU tests with the generic latest image. Re-run this workflow with force_build=true."
             exit 1
           fi
