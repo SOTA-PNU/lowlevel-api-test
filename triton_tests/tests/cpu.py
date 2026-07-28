@@ -7,7 +7,6 @@ UNSUPPORTED_TL = {"debug_barrier"}
 
 def _setup(use_local: bool) -> None:
     os.environ.setdefault("TRITON_CPU_BACKEND", "1")
-    os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
     triton_module, tl_module = common._load_upstream_triton(use_local)
     common._configure_triton(triton_module, tl_module)
 
