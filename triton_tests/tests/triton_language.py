@@ -1,5 +1,7 @@
+import os
 import time
-from typing import Dict
+from dataclasses import dataclass
+from typing import Callable, Dict, Tuple
 import torch
 
 from triton_tests.common import (
@@ -1035,3 +1037,748 @@ def test_tl_only(args, unsupported_ops=()):
                     TestResult.ERROR, t0, detail=str(e)[:1000])
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# RBLN-compatible kernels shared by CUDA direct launch and NPU custom ops
+# ---------------------------------------------------------------------------
+
+
+RBLN_BATCH = 1
+ROWS = 64
+COLS = 64
+DOT_SIZE = 64
+
+UNARY_MODES = {
+    "abs": 0,
+    "ceil": 1,
+    "cos": 2,
+    "erf": 3,
+    "exp": 4,
+    "exp2": 5,
+    "floor": 6,
+    "log": 7,
+    "log2": 8,
+    "rsqrt": 9,
+    "sigmoid": 10,
+    "sin": 11,
+    "sqrt": 12,
+}
+BINARY_MODES = {"fdiv": 0, "maximum": 1, "minimum": 2}
+REDUCE_MODES = {"max": 0, "min": 1, "sum": 2}
+SHAPE_MODES = {
+    "broadcast": 0,
+    "broadcast_to": 1,
+    "expand_dims": 2,
+    "reshape": 3,
+    "permute": 4,
+    "trans": 5,
+}
+MEMORY_MODES = {"load": 0, "store": 1, "make_block_ptr": 2, "advance": 3}
+CONTROL_MODES = {"static_range": 0, "static_print": 1, "static_assert": 2}
+
+SUPPORTED_OPS = tuple(
+    [
+        "tensor",
+        "zeros",
+        *SHAPE_MODES,
+        "dot",
+        *MEMORY_MODES,
+        "where",
+        *UNARY_MODES,
+        *REDUCE_MODES,
+        *CONTROL_MODES,
+    ]
+)
+
+
+@dataclass(frozen=True)
+class SharedKernels:
+    unary: object
+    binary: object
+    where: object
+    reduce: object
+    zeros: object
+    shape: object
+    dot: object
+    memory: object
+    control: object
+
+
+# CUDA imports this module after common._configure_triton. NPU sets
+# RBLN_USE_CUSTOM_KERNEL before importing it.
+if os.environ.get("RBLN_USE_CUSTOM_KERNEL") == "1":
+    from rebel import triton
+    from rebel.triton import language as tl
+else:
+    from triton_tests import common as _common
+    triton, tl = _common.triton, _common.tl
+    if triton is None or tl is None:
+        raise RuntimeError("configure Triton before importing triton_language")
+
+
+@triton.jit
+def shared_unary(
+    x_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    mode: tl.constexpr,
+):
+    x_block = tl.make_block_ptr(
+        base=x_ptr,
+        shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1),
+        offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols),
+        order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr,
+        shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1),
+        offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols),
+        order=(2, 1, 0),
+    )
+    x = tl.load(x_block)
+    if mode == 0:
+        out = tl.abs(x)
+    elif mode == 1:
+        out = tl.ceil(x)
+    elif mode == 2:
+        out = tl.cos(x)
+    elif mode == 3:
+        out = tl.erf(x)
+    elif mode == 4:
+        out = tl.exp(x)
+    elif mode == 5:
+        out = tl.exp2(x)
+    elif mode == 6:
+        out = tl.floor(x)
+    elif mode == 7:
+        out = tl.log(x)
+    elif mode == 8:
+        out = tl.log2(x)
+    elif mode == 9:
+        out = tl.rsqrt(x)
+    elif mode == 10:
+        out = tl.sigmoid(x)
+    elif mode == 11:
+        out = tl.sin(x)
+    else:
+        out = tl.sqrt(x)
+    tl.store(out_block, out)
+
+
+@triton.jit
+def shared_binary(
+    x_ptr,
+    y_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    mode: tl.constexpr,
+):
+    x_block = tl.make_block_ptr(
+        base=x_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    y_block = tl.make_block_ptr(
+        base=y_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    x = tl.load(x_block)
+    y = tl.load(y_block)
+    if mode == 0:
+        out = tl.fdiv(x, y)
+    elif mode == 1:
+        out = tl.maximum(x, y)
+    else:
+        out = tl.minimum(x, y)
+    tl.store(out_block, out)
+
+
+@triton.jit
+def shared_where(
+    x_ptr,
+    y_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+):
+    x_block = tl.make_block_ptr(
+        base=x_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    y_block = tl.make_block_ptr(
+        base=y_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    x = tl.load(x_block)
+    y = tl.load(y_block)
+    tl.store(out_block, tl.where(x > y, x, y))
+
+
+@triton.jit
+def shared_reduce(
+    x_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    mode: tl.constexpr,
+):
+    x_block = tl.make_block_ptr(
+        base=x_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    x = tl.load(x_block)
+    if mode == 0:
+        reduced = tl.max(x, axis=2, keep_dims=True)
+    elif mode == 1:
+        reduced = tl.min(x, axis=2, keep_dims=True)
+    else:
+        reduced = tl.sum(x, axis=2, keep_dims=True)
+    # RBLN cannot expose a reduced value directly; consume it in a full-rank op.
+    if mode == 0:
+        out = tl.exp(x - reduced)
+    elif mode == 1:
+        out = tl.exp(reduced - x)
+    else:
+        numerator = tl.exp(x)
+        out = numerator / reduced
+    tl.store(out_block, out)
+
+
+@triton.jit
+def shared_zeros(
+    x_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+):
+    x_block = tl.make_block_ptr(
+        base=x_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    x = tl.load(x_block)
+    zeros = tl.zeros((batch, rows, cols), tl.float32)
+    # Use zeros as a numeric operand while retaining a non-constant output graph.
+    tl.store(out_block, tl.exp(tl.maximum(x, zeros)))
+
+
+@triton.jit
+def shared_shape(
+    x_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    mode: tl.constexpr,
+):
+    if mode == 0 or mode == 1:
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        x = tl.load(x_block)
+        reduced = tl.sum(x, axis=2, keep_dims=True)
+        if mode == 0:
+            zeros = tl.zeros((batch, rows, cols), tl.float32)
+            out, _ = tl.broadcast(reduced, zeros)
+        else:
+            out = tl.broadcast_to(reduced, (batch, rows, cols))
+        tl.store(out_block, tl.exp(x - out))
+    elif mode == 2:
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(rows, cols), strides=(cols, 1),
+            offsets=(0, 0), block_shape=(rows, cols), order=(1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(rows, cols), strides=(cols, 1),
+            offsets=(0, 0), block_shape=(rows, cols), order=(1, 0),
+        )
+        x = tl.load(x_block)
+        expanded = tl.expand_dims(x, axis=0)
+        out = tl.reshape(expanded, (rows, cols))
+        tl.store(out_block, tl.exp(out))
+    elif mode == 3:
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        x = tl.load(x_block)
+        flat = tl.reshape(x, (rows, cols))
+        out = tl.reshape(flat, (batch, rows, cols))
+        tl.store(out_block, tl.exp(out))
+    else:
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(rows, cols), strides=(cols, 1),
+            offsets=(0, 0), block_shape=(rows, cols), order=(1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(cols, rows), strides=(rows, 1),
+            offsets=(0, 0), block_shape=(cols, rows), order=(1, 0),
+        )
+        x = tl.load(x_block)
+        if mode == 4:
+            out = tl.permute(x, (1, 0))
+        else:
+            out = tl.trans(x)
+        tl.store(out_block, out)
+
+
+@triton.jit
+def shared_dot(
+    a_ptr,
+    b_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    size: tl.constexpr,
+):
+    a_block = tl.make_block_ptr(
+        base=a_ptr, shape=(batch, size, size),
+        strides=(size * size, size, 1), offsets=(0, 0, 0),
+        block_shape=(batch, size, size), order=(2, 1, 0),
+    )
+    b_block = tl.make_block_ptr(
+        base=b_ptr, shape=(batch, size, size),
+        strides=(size * size, size, 1), offsets=(0, 0, 0),
+        block_shape=(batch, size, size), order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr, shape=(batch, size, size),
+        strides=(size * size, size, 1), offsets=(0, 0, 0),
+        block_shape=(batch, size, size), order=(2, 1, 0),
+    )
+    tl.store(out_block, tl.dot(tl.load(a_block), tl.load(b_block)))
+
+
+@triton.jit
+def shared_memory(
+    x_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    mode: tl.constexpr,
+):
+    if mode == 3:
+        half: tl.constexpr = cols // 2
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, half), order=(2, 1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, half), order=(2, 1, 0),
+        )
+        tl.store(out_block, tl.exp(tl.load(x_block)))
+        x_block = tl.advance(x_block, (0, 0, half))
+        out_block = tl.advance(out_block, (0, 0, half))
+        tl.store(out_block, tl.exp(tl.load(x_block)))
+    else:
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        tl.store(out_block, tl.exp(tl.load(x_block)))
+
+
+@triton.jit
+def shared_control(
+    x_ptr,
+    out_ptr,
+    batch: tl.constexpr,
+    rows: tl.constexpr,
+    cols: tl.constexpr,
+    mode: tl.constexpr,
+):
+    x_block = tl.make_block_ptr(
+        base=x_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    out_block = tl.make_block_ptr(
+        base=out_ptr, shape=(batch, rows, cols),
+        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+        block_shape=(batch, rows, cols), order=(2, 1, 0),
+    )
+    x = tl.load(x_block)
+    if mode == 0:
+        out = x
+        for _ in tl.static_range(0, 2):
+            out = tl.exp(out)
+    else:
+        if mode == 1:
+            tl.static_print("RBLN Triton static_print smoke test")
+        else:
+            tl.static_assert(cols == 64, "shared test expects 64 columns")
+        out = tl.exp(x)
+    tl.store(out_block, out)
+
+
+KERNELS = SharedKernels(
+    unary=shared_unary,
+    binary=shared_binary,
+    where=shared_where,
+    reduce=shared_reduce,
+    zeros=shared_zeros,
+    shape=shared_shape,
+    dot=shared_dot,
+    memory=shared_memory,
+    control=shared_control,
+)
+
+
+def create_kernels(triton_module=None, tl_module=None) -> SharedKernels:
+    """Return the top-level kernels selected when this module was imported."""
+    return KERNELS
+
+
+def selected_ops(only: str) -> Tuple[str, ...]:
+    if not only:
+        return SUPPORTED_OPS
+    requested = tuple(part.strip() for part in only.split(",") if part.strip())
+    unknown = sorted(set(requested) - set(SUPPORTED_OPS))
+    if unknown:
+        raise ValueError(f"Unsupported RBLN Triton op selection: {', '.join(unknown)}")
+    return tuple(name for name in SUPPORTED_OPS if name in requested)
+
+
+def positive_input(device: str = "cpu") -> torch.Tensor:
+    return (
+        torch.rand((RBLN_BATCH, ROWS, COLS), device=device, dtype=torch.float32)
+        + 0.25
+    )
+
+
+def unary_reference(name: str, x: torch.Tensor) -> torch.Tensor:
+    functions: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
+        "abs": torch.abs,
+        "ceil": torch.ceil,
+        "cos": torch.cos,
+        "erf": torch.erf,
+        "exp": torch.exp,
+        "exp2": torch.exp2,
+        "floor": torch.floor,
+        "log": torch.log,
+        "log2": torch.log2,
+        "rsqrt": torch.rsqrt,
+        "sigmoid": torch.sigmoid,
+        "sin": torch.sin,
+        "sqrt": torch.sqrt,
+    }
+    return functions[name](x)
+
+
+def run_cuda_shared_suite(args, triton_module, tl_module):
+    """Directly run the same static kernels used by the RBLN custom-op suite."""
+    kernels = create_kernels(triton_module, tl_module)
+    results = {}
+    device = "cuda"
+    ops = selected_ops(args.only)
+    print(f"\n[CUDA] RBLN-compatible shared kernel coverage: {len(ops)} ops")
+
+    for name in ops:
+        import time
+        t0 = time.time()
+        key = f"shared.tl.{name}"
+        try:
+            x = positive_input(device)
+            if name == "tensor":
+                kernel, kernel_args, expected = (
+                    kernels.unary,
+                    (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS, UNARY_MODES["abs"]),
+                    torch.abs(x),
+                )
+            elif name == "zeros":
+                x = torch.linspace(
+                    -1.0, 1.0, RBLN_BATCH * ROWS * COLS, device=device
+                ).reshape(RBLN_BATCH, ROWS, COLS)
+                kernel, kernel_args, expected = (
+                    kernels.zeros,
+                    (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS),
+                    torch.exp(torch.maximum(x, torch.zeros_like(x))),
+                )
+            elif name in UNARY_MODES:
+                kernel, kernel_args, expected = (
+                    kernels.unary,
+                    (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS, UNARY_MODES[name]),
+                    unary_reference(name, x),
+                )
+            elif name in BINARY_MODES:
+                y = positive_input(device)
+                out = torch.empty_like(x)
+                expected = {
+                    "fdiv": x / y,
+                    "maximum": torch.maximum(x, y),
+                    "minimum": torch.minimum(x, y),
+                }[name]
+                kernel, kernel_args = kernels.binary, (
+                    x, y, out, RBLN_BATCH, ROWS, COLS, BINARY_MODES[name],
+                )
+            elif name == "where":
+                y = positive_input(device)
+                out = torch.empty_like(x)
+                kernel, kernel_args, expected = (
+                    kernels.where,
+                    (x, y, out, RBLN_BATCH, ROWS, COLS),
+                    torch.where(x > y, x, y),
+                )
+            elif name in REDUCE_MODES:
+                out = torch.empty_like(x)
+                reduced = getattr(torch, name)(x, dim=2, keepdim=True)
+                if isinstance(reduced, tuple):
+                    reduced = reduced.values
+                if name == "max":
+                    expected = torch.exp(x - reduced)
+                elif name == "min":
+                    expected = torch.exp(reduced - x)
+                else:
+                    expected = torch.exp(x) / reduced
+                kernel, kernel_args = kernels.reduce, (
+                    x, out, RBLN_BATCH, ROWS, COLS, REDUCE_MODES[name],
+                )
+            elif name in SHAPE_MODES:
+                mode = SHAPE_MODES[name]
+                if name in {"broadcast", "broadcast_to"}:
+                    out = torch.empty_like(x)
+                    expected = torch.exp(x - x.sum(dim=2, keepdim=True))
+                elif name == "expand_dims":
+                    x = positive_input(device)[0].contiguous()
+                    out = torch.empty_like(x)
+                    expected = torch.exp(x)
+                elif name == "reshape":
+                    out = torch.empty_like(x)
+                    expected = torch.exp(x)
+                else:
+                    x = positive_input(device)[0].contiguous()
+                    out = torch.empty((COLS, ROWS), device=device)
+                    expected = x.t().contiguous()
+                kernel, kernel_args = kernels.shape, (x, out, RBLN_BATCH, ROWS, COLS, mode)
+            elif name == "dot":
+                a = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), device=device)
+                b = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), device=device)
+                out = torch.empty_like(a)
+                kernel, kernel_args, expected = (
+                    kernels.dot,
+                    (a, b, out, RBLN_BATCH, DOT_SIZE),
+                    a @ b,
+                )
+            elif name in MEMORY_MODES:
+                if name == "advance":
+                    x = torch.rand((RBLN_BATCH, ROWS, COLS * 2), device=device) + 0.25
+                out = torch.empty_like(x)
+                kernel, kernel_args, expected = (
+                    kernels.memory,
+                    (x, out, RBLN_BATCH, ROWS, x.shape[2], MEMORY_MODES[name]),
+                    torch.exp(x),
+                )
+            else:
+                out = torch.empty_like(x)
+                expected = torch.exp(torch.exp(x)) if name == "static_range" else torch.exp(x)
+                kernel, kernel_args = kernels.control, (
+                    x, out, RBLN_BATCH, ROWS, COLS, CONTROL_MODES[name],
+                )
+
+            if name in BINARY_MODES or name == "where":
+                out = kernel_args[2]
+            elif name == "dot":
+                out = kernel_args[2]
+            else:
+                out = kernel_args[1]
+
+            def launch():
+                kernel[(1,)](*kernel_args)
+
+            launch()
+            torch.cuda.synchronize()
+            tolerance = 2e-1 if name == "dot" else 2e-2
+            ok, max_abs, max_rel = _compare_tensors(
+                out, expected, rtol=tolerance, atol=tolerance
+            )
+            detail = _format_error_detail(
+                f"shared-rbln-compatible:{name}", max_abs, max_rel, reference="torch"
+            )
+            _record_validation(
+                results, key, "tl", "fp32", "exec+perf", t0, ok, detail,
+                launch, args.warmup, args.rep,
+            )
+        except Exception as exc:
+            _record(
+                results, key, "tl", "-", "exec", TestResult.ERROR, t0,
+                detail=str(exc)[:1000],
+            )
+    return results
+
+
+# RBLN discovers custom-op source files by scanning for these decorators.  Keep
+# the wrappers in the same file as the shared kernel factory so compiler replay
+# sees a stable kernel source and cache key.
+if os.environ.get("RBLN_USE_CUSTOM_KERNEL") == "1":
+    from rebel import triton as _rbln_triton
+    from rebel.triton import language as _rbln_tl
+    from rebel.triton.language.extra.rbln import libdevice as _rblib
+    from torch.library import register_fake, triton_op
+
+    RBLN_KERNELS = create_kernels(_rbln_triton, _rbln_tl)
+    _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
+
+    def _active_mode(mapping, default=0):
+        return mapping.get(_ACTIVE_OP, default)
+
+    def _rbln_warmup(kernel, *args):
+        compiled = kernel.warmup(*args, grid=(1,))
+        _rblib.write_rtosa(compiled, args)
+        return compiled
+
+    @triton_op("rbln_triton_ops::shared_unary", mutates_args={})
+    def shared_unary_wrapper(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        _rbln_warmup(RBLN_KERNELS.unary, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(UNARY_MODES))
+        return out
+
+    @register_fake("rbln_triton_ops::shared_unary")
+    def shared_unary_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @triton_op("rbln_triton_ops::shared_binary", mutates_args={})
+    def shared_binary_wrapper(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        _rbln_warmup(RBLN_KERNELS.binary, x, y, out, RBLN_BATCH, ROWS, COLS, _active_mode(BINARY_MODES))
+        return out
+
+    @register_fake("rbln_triton_ops::shared_binary")
+    def shared_binary_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @triton_op("rbln_triton_ops::shared_where", mutates_args={})
+    def shared_where_wrapper(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        _rbln_warmup(RBLN_KERNELS.where, x, y, out, RBLN_BATCH, ROWS, COLS)
+        return out
+
+    @register_fake("rbln_triton_ops::shared_where")
+    def shared_where_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @triton_op("rbln_triton_ops::shared_reduce", mutates_args={})
+    def shared_reduce_wrapper(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        _rbln_warmup(RBLN_KERNELS.reduce, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(REDUCE_MODES))
+        return out
+
+    @register_fake("rbln_triton_ops::shared_reduce")
+    def shared_reduce_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @triton_op("rbln_triton_ops::shared_zeros", mutates_args={})
+    def shared_zeros_wrapper(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        _rbln_warmup(RBLN_KERNELS.zeros, x, out, RBLN_BATCH, ROWS, COLS)
+        return out
+
+    @register_fake("rbln_triton_ops::shared_zeros")
+    def shared_zeros_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    def _shape_for_active_op():
+        mode = _active_mode(SHAPE_MODES)
+        if mode in (0, 1, 3):
+            return (RBLN_BATCH, ROWS, COLS)
+        if mode == 2:
+            return (ROWS, COLS)
+        return (COLS, ROWS)
+
+    @triton_op("rbln_triton_ops::shared_shape", mutates_args={})
+    def shared_shape_wrapper(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty(_shape_for_active_op(), dtype=x.dtype, device=x.device)
+        _rbln_warmup(RBLN_KERNELS.shape, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(SHAPE_MODES))
+        return out
+
+    @register_fake("rbln_triton_ops::shared_shape")
+    def shared_shape_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty(_shape_for_active_op(), dtype=x.dtype, device=x.device)
+
+    @triton_op("rbln_triton_ops::shared_dot", mutates_args={})
+    def shared_dot_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(a)
+        _rbln_warmup(RBLN_KERNELS.dot, a, b, out, RBLN_BATCH, DOT_SIZE)
+        return out
+
+    @register_fake("rbln_triton_ops::shared_dot")
+    def shared_dot_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(a)
+
+    @triton_op("rbln_triton_ops::shared_memory", mutates_args={})
+    def shared_memory_wrapper(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        memory_cols = COLS * 2 if _ACTIVE_OP == "advance" else COLS
+        _rbln_warmup(RBLN_KERNELS.memory, x, out, RBLN_BATCH, ROWS, memory_cols, _active_mode(MEMORY_MODES))
+        return out
+
+    @register_fake("rbln_triton_ops::shared_memory")
+    def shared_memory_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @triton_op("rbln_triton_ops::shared_control", mutates_args={})
+    def shared_control_wrapper(x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        _rbln_warmup(RBLN_KERNELS.control, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(CONTROL_MODES))
+        return out
+
+    @register_fake("rbln_triton_ops::shared_control")
+    def shared_control_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(x)

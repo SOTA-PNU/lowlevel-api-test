@@ -1,7 +1,6 @@
 import os
 
 from triton_tests import common
-from triton_tests.tests import triton_language
 
 UNSUPPORTED_TL = {"debug_barrier"}
 
@@ -26,6 +25,7 @@ def _capability_check() -> None:
 
 def run(args):
     _setup(args.local_triton)
+    from triton_tests.tests import triton_language
     common._set_runtime_device("cpu")
     _capability_check()
     triton_language.configure(common.triton, common.tl)

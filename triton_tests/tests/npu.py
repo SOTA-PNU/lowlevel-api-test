@@ -67,7 +67,6 @@ def _device_inventory() -> dict:
             continue
     return {"devices": []}
 
-
 def _device_label(torch_module) -> str:
     devices = _device_inventory().get("devices", [])
     if devices:
@@ -107,7 +106,25 @@ def run(args) -> bool:
     common._set_runtime_device("npu", _device_label(common.torch))
     print(f"Triton: {getattr(common.triton, '__version__', 'unknown')}")
     print(f"Device: {common._device_string()}")
-    return _run_integration_examples(common.REPO_ROOT)
+    all_ok = True
+    if args.module in {"tl", "triton.language", "all"}:
+        # Import lazily so CUDA/CPU invocations do not require rebel-compiler.
+        from triton_tests.tests import npu_language
+        results = npu_language.run(args)
+        all_ok = all(
+            result.result not in {common.TestResult.FAIL, common.TestResult.ERROR}
+            for result in results.values()
+        )
+
+    if args.module == "all":
+        all_ok = _run_integration_examples(common.REPO_ROOT) and all_ok
+    elif args.module not in {"tl", "triton.language"}:
+        print(
+            f"[NPU] module '{args.module}' is unsupported; "
+            "use --module tl or --module all."
+        )
+        all_ok = False
+    return all_ok
 
 def _run_integration_examples(repo_root: str) -> bool:
     """Run every RBLN Triton integration example in an isolated process."""
@@ -135,7 +152,13 @@ def _run_integration_examples(repo_root: str) -> bool:
 
         env = dict(os.environ)
         env.pop("RBLN_WRITE_RTOSA", None)
+        # Examples are self-contained, so they need no repo path. The compiler
+        # still shells out to `python3` for kernel compilation, which must resolve
+        # to this interpreter or every example falls back to eager CPU.
         env["PYTHONPATH"] = ""
+        env["PATH"] = os.pathsep.join(
+            path for path in (os.path.dirname(sys.executable), env.get("PATH")) if path
+        )
         process = subprocess.run(
             [sys.executable, path],
             cwd=examples_dir,
