@@ -214,7 +214,12 @@ Full `--module all` runs are saved to:
 reports/report_all_operators.txt
 ```
 
-Module-only runs print the report to the console without saving a file. The process exits with status 1 when any test produces FAIL or ERROR.
+Module-only runs print the report to the console without saving a file. By
+default, the process exits with status 1 when any test produces FAIL or ERROR.
+Use `--soft-fail-results` to keep those per-test results in the report while
+returning status 0 after a completed test run. Setup failures and errors that
+prevent the suite from running still return a non-zero status. Stable Test CI
+enables this result policy.
 
 ### Example Output
 
@@ -325,7 +330,9 @@ CPU mode verifies the Triton CPU backend and runs `tl` tests only. NPU mode foll
 - FAIL, ERROR, and SKIP have distinct meanings
 - Compilation/launch status is reported separately from numeric accuracy
 - Backend capability errors are reported before unsupported tests begin
-- The command exits with status 1 if any collected result is FAIL or ERROR
+- The command exits with status 1 if any collected result is FAIL or ERROR,
+  unless `--soft-fail-results` is enabled
+- `--soft-fail-results` does not hide setup or test-availability failures
 
 ## Common Issues and Solutions
 

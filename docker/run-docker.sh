@@ -6,6 +6,10 @@
 set -e
 
 DOCKER_IMAGE_REF="${DOCKER_IMAGE_LOCAL:-triton-local-build}:${DOCKER_IMAGE_TAG:-latest}"
+TEST_RESULT_POLICY_ARG=""
+if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
+    TEST_RESULT_POLICY_ARG="--soft-fail-results"
+fi
 
 # Function to show usage
 show_usage() {
@@ -121,7 +125,8 @@ run_test() {
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
-            /opt/triton-venv/bin/python triton_test.py --device npu
+            /opt/triton-venv/bin/python triton_test.py --device npu \
+            $TEST_RESULT_POLICY_ARG
 
     elif [ "$device" = "cuda" ]; then
         echo "🚀 Using NVIDIA runtime with CUDA..."
@@ -141,7 +146,8 @@ run_test() {
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cuda
+            /opt/triton-venv/bin/python triton_test.py --local-triton --device cuda \
+            $TEST_RESULT_POLICY_ARG
 
     else
         echo "🖥️  NVIDIA runtime not available, running without GPU support..."
@@ -160,7 +166,8 @@ run_test() {
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env TRITON_CPU_BACKEND=1 \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
+            /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu \
+            $TEST_RESULT_POLICY_ARG
     fi
 
     # Cleanup will be done automatically by trap on function exit

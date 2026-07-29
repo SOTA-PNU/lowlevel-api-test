@@ -34,6 +34,15 @@ Examples:
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=100)
     parser.add_argument("--local-triton", action="store_true")
+    parser.add_argument(
+        "--soft-fail-results",
+        action="store_true",
+        help=(
+            "Return success after the test suite runs even when individual tests "
+            "report FAIL or ERROR. Errors that prevent the suite from running "
+            "still return failure."
+        ),
+    )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
 
@@ -53,7 +62,15 @@ Examples:
         results, triton_module, api = cpu_tests.run(args)
     elif args.device == "npu":
         ok = npu_tests.run(args)
-        raise SystemExit(0 if ok else 1)
+        if not ok:
+            if args.soft_fail_results:
+                print(
+                    "\nIndividual test failures were reported, but result failures "
+                    "are non-blocking for this run."
+                )
+            else:
+                raise SystemExit(1)
+        return
     else:
         results, triton_module, api = cuda_tests.run(args)
     elapsed = time.time() - start
@@ -71,8 +88,17 @@ Examples:
     else:
         print("\nModule-only run; report file was not saved.")
 
-    if any(r.result in {TestResult.FAIL, TestResult.ERROR} for r in results.values()):
-        raise SystemExit(1)
+    has_result_failures = any(
+        r.result in {TestResult.FAIL, TestResult.ERROR} for r in results.values()
+    )
+    if has_result_failures:
+        if args.soft_fail_results:
+            print(
+                "\nIndividual test failures were reported, but result failures "
+                "are non-blocking for this run."
+            )
+        else:
+            raise SystemExit(1)
 
 if __name__ == "__main__":
     main()

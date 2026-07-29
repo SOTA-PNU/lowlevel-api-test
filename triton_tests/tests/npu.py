@@ -136,20 +136,26 @@ def _run_integration_examples(repo_root: str) -> bool:
     print("\n[NPU] Running RBLN Triton kernel examples (torch.compile backend='rbln')")
     print(f"[NPU] examples dir: {examples_dir}")
     if not os.path.isdir(examples_dir):
-        print(f"[NPU] ERROR: examples dir not found: {examples_dir}")
-        print("      Mount the repo's tests/ into the container, e.g.:")
-        print('      -v "$PWD/tests:/workspace/tests:ro"')
-        return False
+        raise RuntimeError(
+            f"NPU integration examples directory not found: {examples_dir}. "
+            "Mount the repository tests directory into the container."
+        )
+
+    missing_examples = [
+        os.path.join(examples_dir, filename)
+        for _, filename in TRITON_EXAMPLES
+        if not os.path.isfile(os.path.join(examples_dir, filename))
+    ]
+    if missing_examples:
+        raise RuntimeError(
+            "NPU integration tests cannot run because example files are missing: "
+            + ", ".join(missing_examples)
+        )
 
     print(f"{'example':<22}{'status':<8}detail")
     all_ok = True
     for name, filename in TRITON_EXAMPLES:
         path = os.path.join(examples_dir, filename)
-        if not os.path.isfile(path):
-            print(f"{name:<22}{'MISSING':<8}{path}")
-            all_ok = False
-            continue
-
         env = dict(os.environ)
         env.pop("RBLN_WRITE_RTOSA", None)
         # Examples are self-contained, so they need no repo path. The compiler
