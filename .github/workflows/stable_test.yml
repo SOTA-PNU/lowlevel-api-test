@@ -85,7 +85,7 @@ jobs:
 
   env-cpu:
     name: Prepare CPU Environment
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -127,7 +127,7 @@ jobs:
 
   env-gpu:
     name: Prepare GPU Environment
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -196,7 +196,7 @@ jobs:
 
   env-npu:
     name: Prepare NPU Environment
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -238,7 +238,7 @@ jobs:
 
   build-cpu:
     name: Build CPU Image
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted]
     needs: env-cpu                          
     if: ${{ needs.env-cpu.result == 'success' }}  
     env:
@@ -273,7 +273,7 @@ jobs:
 
   build-gpu:
     name: Build GPU Image
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted]
     needs: env-gpu                            
     if: ${{ needs.env-gpu.result == 'success' }} 
     env:
@@ -311,7 +311,7 @@ jobs:
 
   build-npu:
     name: Build NPU Image
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted]
     needs: env-npu
     if: ${{ needs.env-npu.result == 'success' }}
     env:
@@ -358,7 +358,7 @@ jobs:
 
   test-cpu:
     name: Test CPU Image
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted]
     needs:
       - detect-changes
       - build-cpu
@@ -388,7 +388,7 @@ jobs:
 
   test-gpu:
     name: Test GPU Image
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted]
     needs:
       - detect-changes
       - build-gpu
@@ -418,7 +418,7 @@ jobs:
 
   test-npu:
     name: Test NPU Image
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted]
     needs:
       - detect-changes
       - build-npu
@@ -450,7 +450,7 @@ jobs:
 
   release-cpu:
     name: Release CPU Image
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted]
     needs: test-cpu
     if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
@@ -491,7 +491,7 @@ jobs:
 
   release-gpu:
     name: Release GPU Image
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted]
     needs: test-gpu
     if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
@@ -532,7 +532,7 @@ jobs:
 
   release-npu:
     name: Release NPU Image
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted]
     needs: test-npu
     if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
