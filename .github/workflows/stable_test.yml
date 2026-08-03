@@ -342,11 +342,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SP=/usr/local/lib/python3.10/dist-packages
+          SP="$(python3.10 -c 'from importlib.metadata import distribution; print(distribution("rebel-compiler").locate_file(""))')"
+          echo ">>> Found rebel-compiler site-packages at ${SP}"
+
+          for package in rebel tvm rebel_compiler.libs; do
+            if [ ! -e "${SP}/${package}" ]; then
+              echo "::error::Missing ${SP}/${package}"
+              exit 1
+            fi
+          done
+
+          shopt -s nullglob
+          dist_info=("${SP}"/rebel_compiler-*.dist-info)
+          if [ "${#dist_info[@]}" -eq 0 ]; then
+            echo "::error::Missing rebel_compiler-*.dist-info under ${SP}"
+            exit 1
+          fi
+
           rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
           cp -a /usr/bin/rbln-smi /usr/bin/rbln-stat docker/rbln-runtime/
           cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "$SP"/rebel_compiler-*.dist-info \
+          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "${dist_info[@]}" \
                 docker/rbln-runtime/
 
       - name: Build Docker image
