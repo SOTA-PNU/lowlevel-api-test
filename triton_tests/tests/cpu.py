@@ -2,8 +2,6 @@ import os
 
 from triton_tests import common
 
-UNSUPPORTED_TL = {"debug_barrier"}
-
 def _setup(use_local: bool) -> None:
     os.environ.setdefault("TRITON_CPU_BACKEND", "1")
     triton_module, tl_module = common._load_upstream_triton(use_local)
@@ -35,6 +33,6 @@ def run(args):
     print(f"Device: {common._device_string()}")
     args.module = "tl"
 
-    results = triton_language.test_tl_only(args, unsupported_ops=UNSUPPORTED_TL)
+    results = triton_language.test_tl_only(args)
     api = {"tl": len(triton_language.collect_tl_symbols()), "libdevice": 0, "extra": 0}
     return results, common.triton, api

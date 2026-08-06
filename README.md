@@ -53,7 +53,7 @@ Discovers callable APIs from the installed Triton version
 
 - **CUDA testing**: Runs `tl`, `libdevice`, and `extra.cuda` tests with real kernel launches
 - **CPU testing**: Runs `tl` tests through a registered Triton CPU backend
-- **Rebellions NPU testing**: Runs seven `rebel.triton` examples through `torch.compile(..., backend="rbln")`
+- **Rebellions NPU testing**: Sweeps every callable exported by `rebel.triton.language`, executes runtime operations through RBLN custom-kernel adapters, and runs seven integration examples through `torch.compile(..., backend="rbln")`
 - **Automatic selection**: Uses CUDA when available and CPU otherwise
 - **Device reporting**: Includes the active device in the generated result summary
 
@@ -120,7 +120,13 @@ The test suite adapts its behavior to the selected backend:
 |---|---|---|---|
 | **CPU** | `tl` only | Registered Triton CPU backend | Skips `libdevice` and `extra.cuda` |
 | **CUDA** | `tl`, `libdevice`, and `extra.cuda` | CUDA-enabled PyTorch and NVIDIA GPU | Provides the complete operator suite |
-| **NPU** | Seven RBLN integration examples | Active `rebel` backend and Rebellions runtime | Uses `rebel.triton`, not upstream Triton |
+| **NPU** | All discovered `rebel.triton.language` callables plus seven RBLN integration examples | Active `rebel` backend and Rebellions runtime | Runtime operations use `warmup`, RTOSA emission, custom-op registration, and strict RBLN compilation |
+
+For every callable exported by both upstream Triton and `rebel.triton`, CPU,
+CUDA, and NPU use the same canonical `@triton.jit` kernel definition. CPU and
+CUDA launch it directly; NPU invokes it through the RBLN custom-op/warmup
+adapter. Callables that exist only in a newer upstream Triton release retain an
+upstream-only kernel and are not presented as cross-backend comparisons.
 
 CPU mode verifies backend registration before running:
 
@@ -170,7 +176,7 @@ python triton_test.py --list
 | **Matrix operations** | `dot` and related matrix primitives |
 | **Program and compiler helpers** | program IDs, hints, and control helpers |
 
-Executable tensor operations use shared functional and performance smoke kernels. Type/meta helpers or operations requiring separate integration coverage may be marked SKIP.
+Every successful NPU case compiles and invokes a real custom kernel. The report therefore uses `exec` for kernel success and omits a separate mode column. `accuracy=PASS` means the target API has a numeric or invariant result that matched its reference; `accuracy=N/A` means a type, annotation, hint, or static-debug API has no target value to compare, even though its containing sentinel kernel ran. Helpers with observable runtime behavior (`PropagateNan`, `range`, `static_range`, `device_print`, `gather`, `histogram`, `dot_scaled`, `bitonic_merge`, and `map_elementwise`) run real kernels with policy, sentinel, or PyTorch-reference validation. Type/meta exports such as `const`, `constexpr`, `dtype`, `block_type`, `pointer_type`, `function_type`, `condition`, `slice`, tuple types, and tensor-descriptor types are instantiated and used inside a JIT compile context. CUDA/CPU also execute a backend-specific `inline_asm_elementwise` identity probe. Constructor/signature validation alone is never a correctness PASS; a missing compile adapter is reported as ERROR.
 
 ### LIBDEVICE (197 operators)
 
@@ -200,13 +206,13 @@ Wrappers with a local reference formula receive an accuracy result. Other succes
 
 Reports include:
 
-- PASS, FAIL, ERROR, and SKIP totals
+- PASS, FAIL, and ERROR totals
 - Separate compile/launch (`exec`) and correctness (`accuracy`) statuses
 - Device and Triton version information
 - Callable API availability counts
 - Module-level result breakdowns
 - Per-test dtype, mode, execution time, and throughput
-- Failure, error, and skip details
+- Failure and error details
 
 Full `--module all` runs are saved to:
 
@@ -312,9 +318,9 @@ NPU images are not built by `build-docker.sh`. They require a separate `BUILD_MO
 
 `triton_test.py` parses CLI requests and dispatches them to the CUDA, CPU, or
 NPU flow under `triton_tests/tests/`. Each device file contains its Triton
-setup, capability checks, device discovery, and test dispatch. CUDA and CPU
-share the operator implementations in `tests/triton_language.py`, while
-CUDA-only extensions stay in their own files.
+setup, capability checks, device discovery, and test dispatch. CPU, CUDA, and
+NPU share canonical operator kernels in `tests/triton_language.py`; only launch
+adapters and genuinely backend-specific extensions stay separate.
 
 1. Import the installed Triton implementation or the local source selected by `--local-triton`.
 2. Select the requested device and verify the required backend.
@@ -322,12 +328,12 @@ CUDA-only extensions stay in their own files.
 4. Compile and execute the supported operations, validate results where a reference is available, and collect performance measurements.
 5. Print a shared result summary and save a text report for `--module all` runs.
 
-CPU mode verifies the Triton CPU backend and runs `tl` tests only. NPU mode follows a separate path: it verifies the `rebel` backend and runs the examples under `tests/rbln_triton/` as subprocesses instead of producing the standard operator report.
+CPU mode verifies the Triton CPU backend and runs `tl` tests only. NPU mode verifies the `rebel` backend, includes every discovered `rebel.triton.language` callable in the standard operator report, executes runtime callables through RBLN custom-op adapters, and runs the examples under `tests/rbln_triton/` as subprocesses.
 
 ### Error Handling
 
 - Individual failures are collected instead of stopping the suite immediately
-- FAIL, ERROR, and SKIP have distinct meanings
+- PASS, FAIL, and ERROR have distinct meanings; discovered callables are never silently skipped
 - Compilation/launch status is reported separately from numeric accuracy
 - Backend capability errors are reported before unsupported tests begin
 - The command exits with status 1 if any collected result is FAIL or ERROR,
@@ -368,9 +374,9 @@ Failed to import Triton
 
 **Solution:** Install the correct Triton implementation for the selected backend, or use `--local-triton` after building the local source.
 
-### Tensor Descriptor Tests Are Skipped
+### Tensor Descriptor Tests Report Errors
 
-Tensor descriptor operations require Hopper (`sm90+`). Skips on older GPU architectures are expected.
+Tensor descriptor operations require Hopper (`sm90+`). Unsupported architectures or missing descriptor integration are reported as ERROR rather than silently skipped.
 
 ### Libdevice Count Warning
 

@@ -26,7 +26,7 @@ Examples:
     parser.add_argument("--dtype", choices=["fp32", "fp64", "int32", "all"], default="fp32",
                         help="Kept for compatibility. libdevice all-wrapper smoke mode chooses signatures automatically; tl uses fp32; extra uses int64 smoke outputs.")
     parser.add_argument("--only", type=str, default="",
-                        help="Comma-separated op names. Used by libdevice and by the shared RBLN-compatible tl suite, e.g. exp,sum,dot")
+                        help="Comma-separated op names. Used by libdevice and tl suites, e.g. exp,sum,dot")
     parser.add_argument("--expect-libdevice-count", type=int, default=197,
                         help="Expected exported libdevice wrapper count after exclusions; warn if different.")
     parser.add_argument("--size", type=int, default=1 << 20)
@@ -61,16 +61,7 @@ Examples:
     if args.device == "cpu":
         results, triton_module, api = cpu_tests.run(args)
     elif args.device == "npu":
-        ok = npu_tests.run(args)
-        if not ok:
-            if args.soft_fail_results:
-                print(
-                    "\nIndividual test failures were reported, but result failures "
-                    "are non-blocking for this run."
-                )
-            else:
-                raise SystemExit(1)
-        return
+        results, triton_module, api = npu_tests.run(args)
     else:
         results, triton_module, api = cuda_tests.run(args)
     elapsed = time.time() - start

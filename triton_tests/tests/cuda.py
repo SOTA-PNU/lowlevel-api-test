@@ -44,11 +44,6 @@ def run(args):
 
     if args.module in {"tl", "triton.language"}:
         results = triton_language.test_tl_only(args)
-        results.update(
-            triton_language.run_cuda_shared_suite(
-                args, common.triton, common.tl
-            )
-        )
     elif args.module == "libdevice":
         results = cuda_libdevice.test_libdevice_only(args)
     elif args.module == "extra":
@@ -56,11 +51,6 @@ def run(args):
     else:
         results = {}
         results.update(triton_language.test_tl_only(args))
-        results.update(
-            triton_language.run_cuda_shared_suite(
-                args, common.triton, common.tl
-            )
-        )
         results.update(cuda_libdevice.test_libdevice_only(args))
         results.update(cuda_extra.test_extra_only(args))
 

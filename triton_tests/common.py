@@ -25,7 +25,6 @@ class TestResult(Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     ERROR = "ERROR"
-    SKIP = "SKIP"
 
 @dataclass
 class TestResultInfo:
@@ -45,13 +44,12 @@ class TestResultInfo:
         if self.exec_status is None:
             self.exec_status = {
                 TestResult.ERROR: "FAIL",
-                TestResult.SKIP: "SKIP",
             }.get(self.result, "PASS")
         if self.accuracy_status is None:
             if self.result == TestResult.FAIL:
                 self.accuracy_status = "FAIL"
             elif self.result == TestResult.PASS:
-                if "ref=smoke_only" in self.detail or "max_abs=NA" in self.detail or ("ref=invariant" in self.detail and "max_abs" not in self.detail):
+                if "target_result=N/A" in self.detail or "ref=smoke_only" in self.detail or "max_abs=NA" in self.detail or ("ref=invariant" in self.detail and "max_abs" not in self.detail):
                     self.accuracy_status = "N/A"
                 else:
                     self.accuracy_status = "PASS"
@@ -151,10 +149,9 @@ def _module_breakdown(results: Dict[str, TestResultInfo]) -> Dict[str, Dict[str,
         TestResult.PASS: "passed",
         TestResult.FAIL: "failed",
         TestResult.ERROR: "errors",
-        TestResult.SKIP: "skipped",
     }
     for r in results.values():
-        stats = modules.setdefault(r.module, {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0})
+        stats = modules.setdefault(r.module, {"total": 0, "passed": 0, "failed": 0, "errors": 0})
         stats["total"] += 1
         stats[fields[r.result]] += 1
     return modules
@@ -206,13 +203,11 @@ def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: s
         device=_device_string(),
     )
     if status == TestResult.PASS:
-        print(f"  ✅ {name:42} {mode:16} {dtype:6} {ms if ms is not None else '-'}")
+        print(f"✅  {name:42} {dtype:6} {ms if ms is not None else '-'}")
     elif status == TestResult.FAIL:
-        print(f"  ❌ {name:42} {mode:16} {dtype:6} {detail}")
-    elif status == TestResult.SKIP:
-        print(f"  ⏭️  {name:42} {mode:16} {dtype:6} {detail}")
+        print(f"❌  {name:42} {dtype:6} {detail}")
     else:
-        print(f"  🔥 {name:42} {mode:16} {dtype:6} {detail}")
+        print(f"⚠️   {name:42} {dtype:6} {detail}")
 
 def _validation_detail(ok: bool, detail: str = "validated") -> str:
     return detail if ok else f"validation failed: {detail}"

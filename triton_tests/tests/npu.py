@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from triton_tests import common
 
 def _setup() -> None:
@@ -100,33 +101,31 @@ TRITON_EXAMPLES = [
     ("block_scaled_matmul", "10_block_scaled_matmul.py"),
 ]
 
-def run(args) -> bool:
+def run(args):
     _setup()
     _capability_check()
     common._set_runtime_device("npu", _device_label(common.torch))
     print(f"Triton: {getattr(common.triton, '__version__', 'unknown')}")
     print(f"Device: {common._device_string()}")
-    all_ok = True
+    results = {}
     if args.module in {"tl", "triton.language", "all"}:
         # Import lazily so CUDA/CPU invocations do not require rebel-compiler.
         from triton_tests.tests import npu_language
-        results = npu_language.run(args)
-        all_ok = all(
-            result.result not in {common.TestResult.FAIL, common.TestResult.ERROR}
-            for result in results.values()
-        )
+        results.update(npu_language.run(args))
 
     if args.module == "all":
-        all_ok = _run_integration_examples(common.REPO_ROOT) and all_ok
+        results.update(_run_integration_examples(common.REPO_ROOT))
     elif args.module not in {"tl", "triton.language"}:
-        print(
-            f"[NPU] module '{args.module}' is unsupported; "
-            "use --module tl or --module all."
+        raise RuntimeError(
+            f"NPU module '{args.module}' is unsupported; "
+            "use --module tl or --module all"
         )
-        all_ok = False
-    return all_ok
 
-def _run_integration_examples(repo_root: str) -> bool:
+    from triton_tests.tests import triton_language
+    api = {"tl": len(triton_language.collect_tl_symbols()), "libdevice": 0, "extra": 0}
+    return results, common.triton, api
+
+def _run_integration_examples(repo_root: str) -> dict:
     """Run every RBLN Triton integration example in an isolated process."""
     examples_dir = os.environ.get(
         "RBLN_TRITON_EXAMPLES_DIR",
@@ -153,8 +152,9 @@ def _run_integration_examples(repo_root: str) -> bool:
         )
 
     print(f"{'example':<22}{'status':<8}detail")
-    all_ok = True
+    results = {}
     for name, filename in TRITON_EXAMPLES:
+        t0 = time.time()
         path = os.path.join(examples_dir, filename)
         env = dict(os.environ)
         env.pop("RBLN_WRITE_RTOSA", None)
@@ -175,14 +175,26 @@ def _run_integration_examples(repo_root: str) -> bool:
         passed = process.returncode == 0 and "PASSED" in process.stdout
         detail = "" if passed else f"exit={process.returncode}"
         print(f"{name:<22}{'PASS' if passed else 'FAIL':<8}{detail}")
+        common._record(
+            results,
+            f"integration.{name}",
+            "integration",
+            "fp32",
+            "compile+exec",
+            common.TestResult.PASS if passed else common.TestResult.ERROR,
+            t0,
+            detail="RBLN integration example" if passed else detail,
+        )
         if not passed:
-            all_ok = False
             tail = (process.stdout[-1500:] + "\n" + process.stderr[-1500:]).strip()
             print("  ----- output (tail) -----")
             for line in tail.splitlines()[-25:]:
                 print(f"  {line}")
             print("  -------------------------")
 
+    all_ok = all(
+        result.result == common.TestResult.PASS for result in results.values()
+    )
     status = "ALL PASSED" if all_ok else "SOME FAILED"
     print(f"\n[NPU] Triton-examples-on-NPU: {status}")
-    return all_ok
+    return results
