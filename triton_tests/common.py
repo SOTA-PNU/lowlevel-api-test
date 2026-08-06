@@ -107,6 +107,57 @@ def _sync_device() -> None:
     if RUNTIME_DEVICE == "cuda":
         torch.cuda.synchronize()
 
+class NativeOutputCapture:
+    """Capture Python and native compiler output written to stdout/stderr."""
+
+    def __enter__(self):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self.output = ""
+        self.stream = tempfile.TemporaryFile(mode="w+b")
+        self.saved_stdout = os.dup(1)
+        self.saved_stderr = os.dup(2)
+        os.dup2(self.stream.fileno(), 1)
+        os.dup2(self.stream.fileno(), 2)
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(self.saved_stdout, 1)
+        os.dup2(self.saved_stderr, 2)
+        os.close(self.saved_stdout)
+        os.close(self.saved_stderr)
+        self.stream.seek(0)
+        self.output = self.stream.read().decode("utf-8", errors="replace")
+        self.stream.close()
+        return False
+
+def _native_error_summary(exc: Exception, output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in lines:
+        if "missing `LLVMTranslationDialectInterface`" in line:
+            return "Triton backend error: " + line.split("error:", 1)[-1].strip()
+    for line in lines:
+        if "error:" in line and not line.startswith("loc(callsite"):
+            return "Triton backend error: " + line.split("error:", 1)[1].strip()[:700]
+    message = str(exc).strip()
+    if message:
+        return message.splitlines()[0][:700]
+    return f"{type(exc).__name__}: native Triton compilation failed"
+
+def run_quietly(fn, synchronize=None) -> str:
+    """Run a kernel without leaking native compiler diagnostics to the console."""
+    capture = NativeOutputCapture()
+    try:
+        with capture:
+            fn()
+            if synchronize is not None:
+                synchronize()
+    except Exception as exc:
+        raise RuntimeError(_native_error_summary(exc, capture.output)) from exc
+    return capture.output
+
 def _device_string() -> str:
     if RUNTIME_DEVICE_LABEL is not None:
         return RUNTIME_DEVICE_LABEL
@@ -179,6 +230,11 @@ def _do_bench(fn, warmup: int, rep: int) -> float:
         _sync_device()
         return (time.perf_counter() - start_t) * 1000.0 / max(rep, 1)
 
+def benchmark_quietly(fn, warmup: int, rep: int) -> float:
+    measured = []
+    run_quietly(lambda: measured.append(_do_bench(fn, warmup, rep)))
+    return measured[0]
+
 def _make_launch(kernel, grid_spec, *kernel_args, **meta):
     def launch():
         kernel[grid_spec](*kernel_args, **meta)
@@ -247,7 +303,7 @@ def _report_detail(detail: str) -> str:
 
 def _record_validation(results, name, module, dtype, mode, t0, ok, detail, launch=None, warmup=1, rep=1, ms=None):
     if ok and launch is not None and ms is None:
-        ms = _do_bench(launch, warmup, rep)
+        ms = benchmark_quietly(launch, warmup, rep)
     _record(
         results, name, module, dtype, mode,
         TestResult.PASS if ok else TestResult.FAIL,

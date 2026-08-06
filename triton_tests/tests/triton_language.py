@@ -15,6 +15,7 @@ from triton_tests.common import (
     _record_validation,
     _runtime_device,
     _sync_device,
+    run_quietly,
 )
 
 triton = None
@@ -91,8 +92,7 @@ def _run_upstream_only_tl_ops(args):
                 launch = _make_launch(
                     reduce_or_kernel, grid, x_int, out, n, BLOCK=block
                 )
-                launch()
-                _sync_device()
+                run_quietly(launch, _sync_device)
                 padded = torch.zeros(
                     grid[0] * block, device=device, dtype=torch.int32
                 )
@@ -107,8 +107,7 @@ def _run_upstream_only_tl_ops(args):
                 launch = _make_launch(
                     topk_kernel, grid, x_fp, out, n, BLOCK=block
                 )
-                launch()
-                _sync_device()
+                run_quietly(launch, _sync_device)
                 padded = torch.full(
                     (grid[0] * block,), -float("inf"), device=device
                 )
@@ -136,8 +135,7 @@ def _run_upstream_only_tl_ops(args):
                     bitonic_merge_kernel, grid, values, out, n,
                     BLOCK=block,
                 )
-                launch()
-                _sync_device()
+                run_quietly(launch, _sync_device)
                 padded = torch.full(
                     (grid[0] * block,), float("inf"), device=device
                 )
@@ -155,8 +153,7 @@ def _run_upstream_only_tl_ops(args):
                     map_elementwise_kernel, grid, x_int, y_int, out, n,
                     BLOCK=block,
                 )
-                launch()
-                _sync_device()
+                run_quietly(launch, _sync_device)
                 expected = torch.where(
                     x_int < y_int, -torch.ones_like(x_int),
                     torch.where(
@@ -175,8 +172,7 @@ def _run_upstream_only_tl_ops(args):
                     upstream_meta_kernel, grid, x_fp, out, n,
                     BLOCK=block, MODE=TL_META_COMPILE[name],
                 )
-                launch()
-                _sync_device()
+                run_quietly(launch, _sync_device)
                 ok, detail = valid(
                     out, x_fp, f"upstream-only:{name}"
                 )
@@ -1737,8 +1733,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
             def launch():
                 kernel[(1,)](*kernel_args)
 
-            launch()
-            _sync_device()
+            run_quietly(launch, _sync_device)
             tolerance = 2e-1 if name == "dot" else 2e-2
             if expected is None:
                 ok = bool(torch.isfinite(out).all())

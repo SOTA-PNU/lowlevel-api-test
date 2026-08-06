@@ -6,7 +6,6 @@ from triton_tests.common import (
     TestResult,
     TestResultInfo,
     _device_string,
-    _do_bench,
     _gbps,
     _load_temp_module,
     _make_launch,
@@ -14,6 +13,8 @@ from triton_tests.common import (
     _runtime_device,
     _sync_device,
     _unlink_quietly,
+    benchmark_quietly,
+    run_quietly,
 )
 
 triton = None
@@ -88,21 +89,19 @@ def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
             out = torch.empty_like(x)
 
             launch = _make_launch(k, grid, x, out, n, args.block, num_warps=4)
-            launch()
-            _sync_device()
+            run_quietly(launch, _sync_device)
             sample = out[:n]
             ok = bool(torch.isfinite(sample).all() and (sample.abs() <= 1.7501).all())
             max_abs = float(torch.max(torch.abs(sample - x.clamp(-1.75, 1.75))).item())
             detail = f"validated-float8-roundtrip:{fn}; ref=invariant; max_abs={max_abs:.6g}; max_rel=NA; sample={float(sample[0].item())}"
-            ms = _do_bench(launch, args.warmup, args.rep) if ok else None
+            ms = benchmark_quietly(launch, args.warmup, args.rep) if ok else None
             gbps = _gbps(n, torch.float32, 1, 1, ms) if ok and ms else None
             return TestResultInfo(TestResult.PASS if ok else TestResult.FAIL, time.time() - t0, "cuda", "fp32", "exec+perf", ms, gbps, detail, _device_string())
 
         out = torch.empty(1, device=_runtime_device(), dtype=torch.int64)
 
         launch = _make_launch(k, (1,), out, num_warps=4)
-        launch()
-        _sync_device()
+        run_quietly(launch, _sync_device)
         val = int(out.item())
         if fn == "num_warps":
             ok = val == 4
@@ -116,7 +115,7 @@ def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
         else:
             ok = val >= 0
             detail = f"validated-special-register:{fn}; ref=invariant; sample={val}"
-        ms = _do_bench(launch, args.warmup, args.rep) if ok else None
+        ms = benchmark_quietly(launch, args.warmup, args.rep) if ok else None
         return TestResultInfo(TestResult.PASS if ok else TestResult.FAIL, time.time() - t0, "cuda", "int64", "exec+perf", ms, None, detail, _device_string())
     except Exception as e:
         return TestResultInfo(TestResult.ERROR, time.time() - t0, "cuda", "-", "exec", None, None, str(e)[:1000], _device_string())

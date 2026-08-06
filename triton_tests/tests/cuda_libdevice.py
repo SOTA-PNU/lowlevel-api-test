@@ -11,7 +11,6 @@ from triton_tests.common import (
     TestResultInfo,
     _compare_tensors,
     _device_string,
-    _do_bench,
     _format_error_detail,
     _load_temp_module,
     _make_launch,
@@ -19,6 +18,8 @@ from triton_tests.common import (
     _runtime_device,
     _sync_device,
     _unlink_quietly,
+    benchmark_quietly,
+    run_quietly,
 )
 
 triton = None
@@ -533,15 +534,14 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
             out = torch.empty((args.size,), device=_runtime_device(), dtype=_torch_dtype_from_tag(sig.output))
 
             launch = _make_launch(module._k, grid, *tensors, out, args.size, args.block)
-            launch()
-            _sync_device()
+            run_quietly(launch, _sync_device)
             expected, reference, rtol, atol = _libdevice_reference(fn, tensors, sig)
             ok = True
             detail = f"validated-smoke:{fn}; ref={reference}; max_abs=NA; max_rel=NA"
             if expected is not None:
                 ok, max_abs, max_rel = _compare_tensors(out, expected, rtol=rtol, atol=atol)
                 detail = _format_error_detail(f"validated-libdevice:{fn}", max_abs, max_rel, reference=reference)
-            ms = _do_bench(launch, args.warmup, args.rep)
+            ms = benchmark_quietly(launch, args.warmup, args.rep)
             _sync_device()
             gbps = _bytes_moved(tensors, out, args.size) / (ms * 1e-3) / 1e9 if ms and ms > 0 else 0.0
             sample = out[:1].detach().cpu().flatten()[0].item()
