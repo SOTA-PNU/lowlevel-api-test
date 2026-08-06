@@ -336,34 +336,8 @@ jobs:
         with:
           submodules: recursive
 
-      # +++ NPU: stage librbln + the runner's already-installed rebel-compiler into
-      #     the build context so the image can VENDOR it (no pypi.rbln.ai, no secret).
-      - name: Stage RBLN runtime + vendored rebel-compiler (from runner)
-        shell: bash
-        run: |
-          set -euo pipefail
-          SP="$(python3.10 -c 'from importlib.metadata import distribution; print(distribution("rebel-compiler").locate_file(""))')"
-          echo ">>> Found rebel-compiler site-packages at ${SP}"
-
-          for package in rebel tvm rebel_compiler.libs; do
-            if [ ! -e "${SP}/${package}" ]; then
-              echo "::error::Missing ${SP}/${package}"
-              exit 1
-            fi
-          done
-
-          shopt -s nullglob
-          dist_info=("${SP}"/rebel_compiler-*.dist-info)
-          if [ "${#dist_info[@]}" -eq 0 ]; then
-            echo "::error::Missing rebel_compiler-*.dist-info under ${SP}"
-            exit 1
-          fi
-
-          rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
-          cp -a /usr/bin/rbln-smi /usr/bin/rbln-stat docker/rbln-runtime/
-          cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "${dist_info[@]}" \
-                docker/rbln-runtime/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
         shell: bash
@@ -372,13 +346,23 @@ jobs:
           CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
           CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
           PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
+          RBLN_PIP_CONFIG: ${{ secrets.RBLN_PIP_CONFIG }}
         run: |
           set -euo pipefail
-          echo ">>> Building NPU image (vendored rebel-compiler, no secret)"
-          docker build \
-            --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+          if [ -z "${RBLN_PIP_CONFIG:-}" ]; then
+            echo "::error::Repository secret RBLN_PIP_CONFIG is required for the NPU image build."
+            exit 1
+          fi
+          PIP_CONFIG_PATH="$RUNNER_TEMP/rbln-pip.conf"
+          trap 'rm -f "$PIP_CONFIG_PATH"' EXIT
+          umask 077
+          printf '%s' "$RBLN_PIP_CONFIG" > "$PIP_CONFIG_PATH"
+
+          echo ">>> Building NPU image with pip-installed rebel-compiler"
+          docker buildx build --load \
             -f docker/Dockerfile \
             -t "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            --secret id=rbln_pip_config,src="$PIP_CONFIG_PATH" \
             --build-arg BUILD_MODE="$BUILD_MODE" \
             --build-arg CUDA_VERSION="$CUDA_VERSION" \
             --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
@@ -456,10 +440,6 @@ jobs:
 
       - name: Run tests
         shell: bash
-        # +++ NPU: pass the NPU devices + rbln_daemon socket into the container.
-        #     run-docker.sh injects ${NPU_DOCKER_ARGS} into the `docker run`.
-        env:
-          NPU_DOCKER_ARGS: "--device /dev/rbln0 --device /dev/rbln1 -v /run/rbln.sock:/run/rbln.sock"
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR

@@ -107,13 +107,11 @@ run_test() {
     if [ "$device" = "npu" ]; then
         echo "🧠 Using NPU container runtime access..."
 
-        # NPU device nodes and vendor runtime libraries are environment-specific.
-        # --privileged lets the self-hosted NPU runner expose its device stack to
-        # the container; NPU_DOCKER_ARGS can add site-specific mounts if needed.
+        # The host RBLN Container Toolkit supplies devices, runtime libraries,
+        # and management tools through its CDI specification.
         docker run -d --name "$CONTAINER_NAME" \
-            --privileged \
+            --device rebellions.ai/npu=all \
             --ipc=host \
-            ${NPU_DOCKER_ARGS:-} \
             -w /workspace \
             -e PYTHONPATH="" \
             "$DOCKER_IMAGE_REF" \

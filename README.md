@@ -287,7 +287,7 @@ The Dockerfile supports three build modes:
 
 - `cuda`: upstream Triton from the submodule
 - `cpu`: `triton-lang/triton-cpu`
-- `npu`: vendored `rebel.triton` and Rebellions runtime libraries
+- `npu`: pip-installed `rebel.triton` with host runtime access provided by the RBLN Container Toolkit
 
 The provided build script detects the host CUDA environment and builds a CUDA or CPU image:
 
@@ -308,7 +308,7 @@ The runner also provides development and explicit device commands:
 
 The selected test command must match the image build mode. For example, `test-cpu` requires a CPU image containing `triton-cpu`; it does not convert a CUDA image into a CPU image.
 
-NPU images are not built by `build-docker.sh`. They require a separate `BUILD_MODE=npu` build with the vendor runtime and `rebel-compiler` packages staged under `docker/rbln-runtime/`. The NPU runner also requires access to the Rebellions device nodes and daemon socket. Once that environment and image are prepared, run:
+NPU images are not built by `build-docker.sh`. They require a separate `BUILD_MODE=npu` build with `rebel-compiler` installed from the authenticated RBLN Python index. The NPU host must have the RBLN driver and Container Toolkit configured; the runner starts the container with `--device rebellions.ai/npu=all`. Once that environment and image are prepared, run:
 
 ```bash
 ./docker/run-docker.sh test-npu

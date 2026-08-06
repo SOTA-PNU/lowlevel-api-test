@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Enhanced Triton Dockerfile with CUDA Version Detection and GPU Architecture Support
 # Automatically detects host CUDA version and builds accordingly
 # Supports CUDA, CPU-only, and out-of-tree NPU backend builds
@@ -14,7 +15,7 @@ ARG PYTORCH_CUDA_VERSION=cu128
 ARG NPU_PIP_PACKAGES=
 # Last triton-cpu revision verified by a successful full CPU image build/test run.
 ARG TRITON_CPU_REF=6ca45149d5b622f1d0c91f0ecf5000eb8224f489
-ARG RBLN_COMPILER_VERSION=0.10.0   # +++ NPU: rebel-compiler (KMD 3.0.0 -> 0.10.x)
+ARG RBLN_COMPILER_VERSION=0.11.0.post1
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -109,24 +110,20 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
 # Install additional requirements
 RUN /opt/triton-venv/bin/pip install numpy pytest
 
-# +++ NPU: rebel.triton comes from rebel-compiler. Instead of DOWNLOADING it from
-#     pypi.rbln.ai (which needs auth / a BuildKit secret), we VENDOR the host's
-#     already-installed rebel-compiler from the build context
-RUN if [ "$BUILD_MODE" = "npu" ]; then \
-        /opt/triton-venv/bin/pip install \
-            attrs cloudpickle cryptography decorator ml_dtypes numpy packaging "prettytable>=3.8" \
-            psutil scipy tornado tqdm typing_extensions; \
+# NPU: install rebel.triton directly from the authenticated RBLN Python index.
+# The pip configuration is provided only during this build step and is never
+# copied into the image or stored in an image layer.
+RUN --mount=type=secret,id=rbln_pip_config,required=false \
+    if [ "$BUILD_MODE" = "npu" ]; then \
+        test -s /run/secrets/rbln_pip_config || \
+            { echo "ERROR: NPU build requires BuildKit secret rbln_pip_config" >&2; exit 1; }; \
+        PIP_CONFIG_FILE=/run/secrets/rbln_pip_config \
+            /opt/triton-venv/bin/pip install --no-cache-dir \
+            "rebel-compiler==${RBLN_COMPILER_VERSION}"; \
     fi
 
-# +++ NPU: bake librbln user-space libs AND the vendored rebel-compiler packages.
-COPY docker/rbln-runtime/ /opt/rbln-lib/
 RUN if [ "$BUILD_MODE" = "npu" ]; then \
-        cp -a /opt/rbln-lib/rbln-smi /opt/rbln-lib/rbln-stat /usr/local/bin/ && \
-        cp -a /opt/rbln-lib/librbln-*.so* /usr/lib/ && ldconfig && \
-        cp -a /opt/rbln-lib/rebel /opt/rbln-lib/tvm /opt/rbln-lib/rebel_compiler.libs \
-              /opt/rbln-lib/rebel_compiler-*.dist-info \
-              /opt/triton-venv/lib/python3.10/site-packages/ && \
-        /opt/triton-venv/bin/python -c "import rebel; print('vendored rebel-compiler', rebel.__version__)"; \
+        /opt/triton-venv/bin/python -c "from importlib.metadata import version; print('pip-installed rebel-compiler', version('rebel-compiler'))"; \
     fi
 
 # Install Triton build dependencies
@@ -151,7 +148,7 @@ RUN if [ "$BUILD_MODE" = "cpu" ]; then \
         /opt/triton-venv/bin/python -c \
             "import triton; print('OK: upstream Triton imported successfully')"; \
     elif [ "$BUILD_MODE" = "npu" ]; then \
-        echo "NPU build uses vendored rebel.triton; skipping upstream Triton build."; \
+        echo "NPU build uses pip-installed rebel.triton; skipping upstream Triton build."; \
     else \
         echo "ERROR: Unsupported BUILD_MODE=${BUILD_MODE}" >&2 && \
         exit 1; \
