@@ -12,10 +12,7 @@ ARG BUILD_MODE=cuda
 ARG CUDA_VERSION=12.8
 ARG CUDA_ARCHITECTURE=sm_120
 ARG PYTORCH_CUDA_VERSION=cu128
-ARG NPU_PIP_PACKAGES=
-# Last triton-cpu revision verified by a successful full CPU image build/test run.
-ARG TRITON_CPU_REF=6ca45149d5b622f1d0c91f0ecf5000eb8224f489
-ARG RBLN_COMPILER_VERSION=0.11.0.post1
+ARG RBLN_COMPILER_VERSION=0.11.1.post1
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -84,7 +81,6 @@ RUN if [ "$BUILD_MODE" = "cpu" ]; then \
         echo "Cloning triton-cpu source for CPU backend..." && \
         git clone https://github.com/triton-lang/triton-cpu.git /opt/triton-src && \
         cd /opt/triton-src && \
-        git checkout "$TRITON_CPU_REF" && \
         git submodule update --init --recursive; \
     else \
         cp -r /workspace/triton /opt/triton-src; \
