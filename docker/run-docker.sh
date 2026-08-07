@@ -115,7 +115,7 @@ run_test() {
             -w /workspace \
             -e PYTHONPATH="" \
             "$DOCKER_IMAGE_REF" \
-            sleep 300
+            sleep infinity
 
         sync_test_sources
         sync_npu_examples
@@ -137,7 +137,7 @@ run_test() {
             -e TRITON_BACKENDS_IN_TREE=1 \
             -e PYTHONPATH="" \
             "$DOCKER_IMAGE_REF" \
-            sleep 300 
+            sleep infinity 
 
         sync_test_sources
 
@@ -156,7 +156,7 @@ run_test() {
             -e TRITON_CPU_BACKEND=1 \
             -e PYTHONPATH="" \
             "$DOCKER_IMAGE_REF" \
-            sleep 300
+            sleep infinity
 
         sync_test_sources
 
