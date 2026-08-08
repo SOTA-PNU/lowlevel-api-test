@@ -8,6 +8,14 @@ name: Stable Test
       - "*"
   workflow_dispatch:
     inputs:
+      target_runner:
+        description: Server to run CI on
+        required: true
+        default: npu-runner
+        type: choice
+        options:
+          - npu-runner
+          - atom-max
       force_build:
         description: Force Docker image rebuild
         required: false
@@ -38,7 +46,7 @@ env:
 jobs:
   detect-changes:
     name: Detect Build Inputs
-    runs-on: self-hosted
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     outputs:
       should_build: ${{ steps.filter.outputs.should_build }}
     steps:
@@ -64,6 +72,11 @@ jobs:
             exit 0
           fi
 
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [ "$REF_TYPE" = "tag" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -85,7 +98,7 @@ jobs:
 
   env-cpu:
     name: Prepare CPU Environment
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -127,7 +140,7 @@ jobs:
 
   env-gpu:
     name: Prepare GPU Environment
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -145,39 +158,40 @@ jobs:
           set -euo pipefail
           echo ">>> Detecting environment..."
 
-          {
-            echo "BUILD_MODE=cpu"
-            echo "CUDA_VERSION=none"
-            echo "CUDA_ARCHITECTURE=none"
-            echo "PYTORCH_CUDA_VERSION=cpu"
-          } > "$BUILD_ARGS"
-
-          if command -v nvidia-smi >/dev/null 2>&1; then
-            {
-              echo "BUILD_MODE=cuda"
-              echo "CUDA_VERSION=12.8"
-
-              GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
-              case "$GPU_NAME" in
-                *"Blackwell"*|*"RTX PRO 6000"*)
-                  echo "CUDA_ARCHITECTURE=sm_120"
-                  echo "PYTORCH_CUDA_VERSION=cu128"
-                  ;;
-                *"Hopper"*|*"H100"*)
-                  echo "CUDA_ARCHITECTURE=sm_90"
-                  echo "PYTORCH_CUDA_VERSION=cu121"
-                  ;;
-                *"Ampere"*|*"A100"*|*"RTX 30"*|*"RTX 40"*)
-                  echo "CUDA_ARCHITECTURE=sm_80"
-                  echo "PYTORCH_CUDA_VERSION=cu121"
-                  ;;
-                *)
-                  echo "CUDA_ARCHITECTURE=sm_80"
-                  echo "PYTORCH_CUDA_VERSION=cu121"
-                  ;;
-              esac
-            } > "$BUILD_ARGS"
+          if ! command -v nvidia-smi >/dev/null 2>&1; then
+            echo "::error::gpu-runner does not provide nvidia-smi; refusing to build a CPU image as gpu-latest."
+            exit 1
           fi
+
+          GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)
+          if [ -z "$GPU_NAME" ]; then
+            echo "::error::No NVIDIA GPU was detected on gpu-runner."
+            exit 1
+          fi
+
+          {
+            echo "BUILD_MODE=cuda"
+            echo "CUDA_VERSION=12.8"
+
+            case "$GPU_NAME" in
+              *"Blackwell"*|*"RTX PRO 6000"*)
+                echo "CUDA_ARCHITECTURE=sm_120"
+                echo "PYTORCH_CUDA_VERSION=cu128"
+                ;;
+              *"Hopper"*|*"H100"*)
+                echo "CUDA_ARCHITECTURE=sm_90"
+                echo "PYTORCH_CUDA_VERSION=cu121"
+                ;;
+              *"Ampere"*|*"A100"*|*"RTX 30"*|*"RTX 40"*)
+                echo "CUDA_ARCHITECTURE=sm_80"
+                echo "PYTORCH_CUDA_VERSION=cu121"
+                ;;
+              *)
+                echo "CUDA_ARCHITECTURE=sm_80"
+                echo "PYTORCH_CUDA_VERSION=cu121"
+                ;;
+            esac
+          } > "$BUILD_ARGS"
 
           cat "$BUILD_ARGS"
           {
@@ -196,7 +210,7 @@ jobs:
 
   env-npu:
     name: Prepare NPU Environment
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -238,7 +252,7 @@ jobs:
 
   build-cpu:
     name: Build CPU Image
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: env-cpu                          
     if: ${{ needs.env-cpu.result == 'success' }}  
     env:
@@ -273,7 +287,7 @@ jobs:
 
   build-gpu:
     name: Build GPU Image
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: env-gpu                            
     if: ${{ needs.env-gpu.result == 'success' }} 
     env:
@@ -311,7 +325,7 @@ jobs:
 
   build-npu:
     name: Build NPU Image
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: env-npu
     if: ${{ needs.env-npu.result == 'success' }}
     env:
@@ -322,17 +336,8 @@ jobs:
         with:
           submodules: recursive
 
-      # +++ NPU: stage librbln + the runner's already-installed rebel-compiler into
-      #     the build context so the image can VENDOR it (no pypi.rbln.ai, no secret).
-      - name: Stage RBLN runtime + vendored rebel-compiler (from runner)
-        shell: bash
-        run: |
-          set -euo pipefail
-          SP=/usr/local/lib/python3.10/dist-packages
-          rm -rf docker/rbln-runtime && mkdir -p docker/rbln-runtime
-          cp -a /usr/lib/librbln-*.so* docker/rbln-runtime/
-          cp -a "$SP/rebel" "$SP/tvm" "$SP/rebel_compiler.libs" "$SP"/rebel_compiler-*.dist-info \
-                docker/rbln-runtime/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
         shell: bash
@@ -341,13 +346,23 @@ jobs:
           CUDA_VERSION: ${{ needs.env-npu.outputs.cuda_version }}
           CUDA_ARCHITECTURE: ${{ needs.env-npu.outputs.cuda_architecture }}
           PYTORCH_CUDA_VERSION: ${{ needs.env-npu.outputs.pytorch_cuda_version }}
+          RBLN_PIP_CONFIG: ${{ secrets.RBLN_PIP_CONFIG }}
         run: |
           set -euo pipefail
-          echo ">>> Building NPU image (vendored rebel-compiler, no secret)"
-          docker build \
-            --cache-from "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+          if [ -z "${RBLN_PIP_CONFIG:-}" ]; then
+            echo "::error::Repository secret RBLN_PIP_CONFIG is required for the NPU image build."
+            exit 1
+          fi
+          PIP_CONFIG_PATH="$RUNNER_TEMP/rbln-pip.conf"
+          trap 'rm -f "$PIP_CONFIG_PATH"' EXIT
+          umask 077
+          printf '%s' "$RBLN_PIP_CONFIG" > "$PIP_CONFIG_PATH"
+
+          echo ">>> Building NPU image with pip-installed rebel-compiler"
+          docker buildx build --load \
             -f docker/Dockerfile \
             -t "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" \
+            --secret id=rbln_pip_config,src="$PIP_CONFIG_PATH" \
             --build-arg BUILD_MODE="$BUILD_MODE" \
             --build-arg CUDA_VERSION="$CUDA_VERSION" \
             --build-arg CUDA_ARCHITECTURE="$CUDA_ARCHITECTURE" \
@@ -358,7 +373,7 @@ jobs:
 
   test-cpu:
     name: Test CPU Image
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs:
       - detect-changes
       - build-cpu
@@ -376,19 +391,15 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
-            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
-          else
+          if ! docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test
+          sh docker/run-docker.sh test-cpu
 
   test-gpu:
     name: Test GPU Image
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs:
       - detect-changes
       - build-gpu
@@ -406,19 +417,15 @@ jobs:
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          elif docker image inspect "${DOCKER_IMAGE_LOCAL}:latest" >/dev/null 2>&1; then
-            echo ">>> ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG} not found; using existing ${DOCKER_IMAGE_LOCAL}:latest"
-          else
+          if ! docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             echo "::error::Missing ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Re-run this workflow with force_build=true."
             exit 1
           fi
-          sh docker/run-docker.sh test
+          sh docker/run-docker.sh test-cuda
 
   test-npu:
     name: Test NPU Image
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs:
       - detect-changes
       - build-npu
@@ -433,16 +440,10 @@ jobs:
 
       - name: Run tests
         shell: bash
-        # +++ NPU: pass the NPU devices + rbln_daemon socket into the container.
-        #     run-docker.sh injects ${NPU_DOCKER_ARGS} into the `docker run`.
-        env:
-          NPU_DOCKER_ARGS: "--device /dev/rbln0 --device /dev/rbln1 -v /run/rbln.sock:/run/rbln.sock"
         run: |
           set -euo pipefail
           unset DOCKER_HOST DOCKER_TLS_CERTDIR
-          if docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
-            docker tag "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" "${DOCKER_IMAGE_LOCAL}:latest"
-          else
+          if ! docker image inspect "${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}" >/dev/null 2>&1; then
             echo "::error::Missing NPU image ${DOCKER_IMAGE_LOCAL}:${DOCKER_IMAGE_TAG}. Refusing to run NPU tests with the generic latest image. Re-run this workflow with force_build=true."
             exit 1
           fi
@@ -450,7 +451,7 @@ jobs:
 
   release-cpu:
     name: Release CPU Image
-    runs-on: [self-hosted, cpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: test-cpu
     if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
@@ -491,7 +492,7 @@ jobs:
 
   release-gpu:
     name: Release GPU Image
-    runs-on: [self-hosted, gpu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: test-gpu
     if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
@@ -532,7 +533,7 @@ jobs:
 
   release-npu:
     name: Release NPU Image
-    runs-on: [self-hosted, npu-runner]
+    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
     needs: test-npu
     if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
