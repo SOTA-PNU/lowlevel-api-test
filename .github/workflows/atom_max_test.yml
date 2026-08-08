@@ -1,0 +1,75 @@
+name: Atom Max Local Test
+
+"on":
+  workflow_dispatch:
+    inputs:
+      strict_results:
+        description: Fail the job when an individual operator reports FAIL or ERROR
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atom-max-local-test
+  cancel-in-progress: false
+
+env:
+  NPU_PYTHON: ${{ vars.ATOM_MAX_NPU_PYTHON || '/home/ubuntu/rbln-venv/bin/python' }}
+
+jobs:
+  test-npu:
+    name: Test NPU venv
+    runs-on: [self-hosted, atom-max]
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify NPU environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x "$NPU_PYTHON" ]; then
+            echo "::error::NPU venv Python not found or not executable: $NPU_PYTHON"
+            echo "Set the ATOM_MAX_NPU_PYTHON repository variable if the venv uses a different path."
+            exit 1
+          fi
+
+          if command -v rbln-smi >/dev/null 2>&1; then
+            rbln-smi --json >/dev/null
+          elif command -v rbln-stat >/dev/null 2>&1; then
+            rbln-stat --json >/dev/null
+          else
+            echo "::error::Neither rbln-smi nor rbln-stat is available to the runner user."
+            exit 1
+          fi
+
+          "$NPU_PYTHON" -c \
+            "import sys, torch; from importlib.metadata import version; from rebel.triton.backends import backends; print('python', sys.executable); print('torch', torch.__version__); print('rebel-compiler', version('rebel-compiler')); print('backends', sorted(backends)); assert 'rebel' in backends, 'rebel backend is not registered'; assert backends['rebel'].driver.is_active(), 'rebel backend is not active'; print('NPU backend active')"
+
+      - name: Run NPU tests
+        id: npu_tests
+        shell: bash
+        env:
+          STRICT_RESULTS: ${{ inputs.strict_results }}
+        run: |
+          set -euo pipefail
+          result_args=()
+          if [ "$STRICT_RESULTS" != "true" ]; then
+            result_args+=(--soft-fail-results)
+          fi
+
+          env -u TRITON_BACKENDS_IN_TREE PYTHONPATH="" \
+            "$NPU_PYTHON" triton_test.py --device npu "${result_args[@]}"
+
+      - name: Upload NPU report
+        if: ${{ always() && (steps.npu_tests.outcome == 'success' || steps.npu_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: atom-max-npu-report-${{ github.sha }}
+          path: reports/report_all_operators.txt
+          if-no-files-found: warn
+          retention-days: 14
