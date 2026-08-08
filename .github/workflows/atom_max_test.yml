@@ -1,4 +1,4 @@
-name: Atom Max Local Test
+name: Atom Max Test
 
 "on":
   workflow_dispatch:
