@@ -1,6 +1,9 @@
 name: Atom Max Test
 
 "on":
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       strict_results:

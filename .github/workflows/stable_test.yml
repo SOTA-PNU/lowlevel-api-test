@@ -8,14 +8,6 @@ name: Stable Test
       - "*"
   workflow_dispatch:
     inputs:
-      target_runner:
-        description: Server to run CI on
-        required: true
-        default: npu-runner
-        type: choice
-        options:
-          - npu-runner
-          - atom-max
       force_build:
         description: Force Docker image rebuild
         required: false
@@ -46,7 +38,7 @@ env:
 jobs:
   detect-changes:
     name: Detect Build Inputs
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: self-hosted
     outputs:
       should_build: ${{ steps.filter.outputs.should_build }}
     steps:
@@ -98,7 +90,7 @@ jobs:
 
   env-cpu:
     name: Prepare CPU Environment
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, cpu-runner]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -140,7 +132,7 @@ jobs:
 
   env-gpu:
     name: Prepare GPU Environment
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, gpu-runner]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -210,7 +202,7 @@ jobs:
 
   env-npu:
     name: Prepare NPU Environment
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, npu-runner]
     needs: detect-changes
     if: ${{ needs.detect-changes.outputs.should_build == 'true' }}
     outputs:
@@ -252,7 +244,7 @@ jobs:
 
   build-cpu:
     name: Build CPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, cpu-runner]
     needs: env-cpu                          
     if: ${{ needs.env-cpu.result == 'success' }}  
     env:
@@ -287,7 +279,7 @@ jobs:
 
   build-gpu:
     name: Build GPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, gpu-runner]
     needs: env-gpu                            
     if: ${{ needs.env-gpu.result == 'success' }} 
     env:
@@ -325,7 +317,7 @@ jobs:
 
   build-npu:
     name: Build NPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, npu-runner]
     needs: env-npu
     if: ${{ needs.env-npu.result == 'success' }}
     env:
@@ -373,7 +365,7 @@ jobs:
 
   test-cpu:
     name: Test CPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, cpu-runner]
     needs:
       - detect-changes
       - build-cpu
@@ -399,7 +391,7 @@ jobs:
 
   test-gpu:
     name: Test GPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, gpu-runner]
     needs:
       - detect-changes
       - build-gpu
@@ -425,7 +417,7 @@ jobs:
 
   test-npu:
     name: Test NPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, npu-runner]
     needs:
       - detect-changes
       - build-npu
@@ -451,7 +443,7 @@ jobs:
 
   release-cpu:
     name: Release CPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, cpu-runner]
     needs: test-cpu
     if: ${{ needs.test-cpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
@@ -492,7 +484,7 @@ jobs:
 
   release-gpu:
     name: Release GPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, gpu-runner]
     needs: test-gpu
     if: ${{ needs.test-gpu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
@@ -533,7 +525,7 @@ jobs:
 
   release-npu:
     name: Release NPU Image
-    runs-on: [self-hosted, "${{ inputs.target_runner || 'npu-runner' }}"]
+    runs-on: [self-hosted, npu-runner]
     needs: test-npu
     if: ${{ needs.test-npu.result == 'success' && (vars.ENABLE_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.enable_release == 'true')) }}
     env:
