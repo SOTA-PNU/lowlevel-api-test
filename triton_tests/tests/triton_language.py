@@ -197,6 +197,39 @@ def _run_upstream_only_tl_ops(args):
                 ok, detail = valid(
                     out, expected, "upstream-only:map_elementwise"
                 )
+            elif name in UPSTREAM_ONLY_TENSOR_OPS:
+                out = torch.empty_like(x_fp)
+                launch = _make_launch(
+                    upstream_tensor_ops_kernel, grid, x_fp, out, n,
+                    BLOCK=block, MODE=UPSTREAM_ONLY_TENSOR_OPS[name],
+                )
+                run_quietly(launch, _sync_device)
+                if name == "to_tensor":
+                    expected = x_fp + 7
+                elif name == "expect_zero":
+                    zero_mask = (
+                        torch.arange(n, device=device) % 2 == 0
+                    )
+                    expected = torch.where(
+                        zero_mask, torch.zeros_like(x_fp), x_fp
+                    )
+                else:
+                    expected = x_fp
+                ok, detail = valid(
+                    out, expected, f"upstream-only:{name}"
+                )
+            elif name == "aggregate_replace":
+                validate_meta_symbol(name, tl, input_dtype)
+                out = torch.empty_like(x_fp)
+                launch = _make_launch(
+                    upstream_tensor_ops_kernel, grid, x_fp, out, n,
+                    BLOCK=block, MODE=AGGREGATE_REPLACE_SENTINEL_MODE,
+                )
+                run_quietly(launch, _sync_device)
+                ok, detail = valid(
+                    out, x_fp, f"upstream-only:{name}"
+                )
+                detail += "; target_result=N/A; sentinel_exec=PASS"
             elif name in UPSTREAM_ONLY_META_OPS:
                 validate_meta_symbol(name, tl, input_dtype)
                 out = torch.empty_like(x_fp)
@@ -395,6 +428,30 @@ def validate_meta_symbol(name, tl_module=None, torch_dtype=torch.float32):
     if name == "range":
         obj(0, 4)
         return "validated range iterator construction"
+
+    if name == "aggregate_replace":
+        class _HostAggregate:
+            __triton_aggregate__ = True
+            __aggregate_fields__ = ("first", "second")
+
+            def __init__(self, first, second):
+                self.first = first
+                self.second = second
+
+        replaced = obj(_HostAggregate(1, 2), second=5)
+        if (replaced.first, replaced.second) != (1, 5):
+            raise TypeError(
+                "aggregate_replace did not replace the requested field"
+            )
+        try:
+            obj(7, first=1)
+        except TypeError:
+            pass
+        else:
+            raise TypeError(
+                "aggregate_replace accepted a non-aggregate instance"
+            )
+        return "validated aggregate field replacement contract"
 
     expected = _META_SIGNATURES.get(name)
     if expected:
@@ -656,6 +713,34 @@ def upstream_meta_kernel(x_ptr, out_ptr, size,
     else:
         with tl.async_task([0]):
             out = x
+    tl.store(out_ptr + offs, out, mask=mask)
+
+UPSTREAM_ONLY_TENSOR_OPS = {
+    "squeeze": 0,
+    "unsqueeze": 1,
+    "to_tensor": 2,
+    "expect_zero": 3,
+}
+AGGREGATE_REPLACE_SENTINEL_MODE = 4
+
+@triton.jit
+def upstream_tensor_ops_kernel(x_ptr, out_ptr, size,
+                               BLOCK: tl.constexpr,
+                               MODE: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < size
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    if MODE == 0:
+        out = tl.squeeze(tl.reshape(x, (1, BLOCK)), 0)
+    elif MODE == 1:
+        out = tl.ravel(tl.unsqueeze(x, 0))
+    elif MODE == 2:
+        out = x + tl.to_tensor(7.0)
+    elif MODE == 3:
+        zero_mask = offs % 2 == 0
+        out = tl.expect_zero(tl.where(zero_mask, 0.0, x), zero_mask)
+    else:
+        out = x
     tl.store(out_ptr + offs, out, mask=mask)
 
 @triton.jit
