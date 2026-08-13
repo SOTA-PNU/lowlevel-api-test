@@ -55,3 +55,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+# Runtime/compiler probe artifacts
+/.inference_time.txt
+/[0-9]*/kernel_compile.py

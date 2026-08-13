@@ -19,6 +19,8 @@ tl = None
 libdevice = None
 extra = None
 
+# Exported by the common libdevice namespace as a declaration-only placeholder;
+# the concrete extern implementation is HIP-only in upstream Triton 3.6.
 EXCLUDED_LIBDEVICE_FUNCS = {"fast_tanhf"}
 
 class TestResult(Enum):
@@ -39,6 +41,7 @@ class TestResultInfo:
     device: str = "unknown"
     exec_status: Optional[str] = None
     accuracy_status: Optional[str] = None
+    energy_mj_per_call: Optional[float] = None
 
     def __post_init__(self):
         if self.exec_status is None:
@@ -184,12 +187,14 @@ def _unlink_quietly(path: Optional[str]):
     except OSError:
         pass
 
-def _metric(value: Optional[float], digits: int) -> str:
-    return f"{value:.{digits}f}" if value is not None else "-"
+def _metric(value: Optional[float], digits: Optional[int] = None) -> str:
+    if value is None:
+        return "-"
+    return repr(value) if digits is None else f"{value:.{digits}f}"
 
 def _print_perf_row(name: str, r: TestResultInfo, dtype_width: int = 22, mode_width: Optional[int] = None):
     mode = f" {r.mode:{mode_width}}" if mode_width is not None else ""
-    print(f"{name:32} {r.result.value:8} {r.dtype:{dtype_width}}{mode} {_metric(r.ms, 4):>10} {_metric(r.gbps, 2):>10}    {r.detail}")
+    print(f"{name:32} {r.result.value:8} {r.dtype:{dtype_width}}{mode} {_metric(r.ms):>10} {_metric(r.gbps, 2):>10}    {r.detail}")
 
 def _result_counts(results: Dict[str, TestResultInfo]) -> Dict[TestResult, int]:
     return {status: sum(1 for r in results.values() if r.result == status) for status in TestResult}
@@ -246,7 +251,8 @@ def _gbps(n: int, dtype: torch.dtype, inputs: int, outputs: int, ms: float) -> f
 
 def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: str,
             mode: str, status: TestResult, start_t: float, ms: Optional[float] = None,
-            gbps: Optional[float] = None, detail: str = ""):
+            gbps: Optional[float] = None, detail: str = "",
+            energy_mj_per_call: Optional[float] = None):
     results[name] = TestResultInfo(
         result=status,
         execution_time=time.time() - start_t,
@@ -256,10 +262,14 @@ def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: s
         ms=ms,
         gbps=gbps,
         detail=detail,
+        energy_mj_per_call=energy_mj_per_call,
         device=_device_string(),
     )
     if status == TestResult.PASS:
-        print(f"✅  {name:42} {dtype:6} {ms if ms is not None else '-'}")
+        perf = f"{ms} ms" if ms is not None else "-"
+        if energy_mj_per_call is not None:
+            perf += f" | {energy_mj_per_call} mJ/call"
+        print(f"✅  {name:42} {dtype:6} {perf}")
     elif status == TestResult.FAIL:
         print(f"❌  {name:42} {dtype:6} {detail}")
     else:
@@ -301,11 +311,13 @@ def _report_detail(detail: str) -> str:
     parts = [p for p in parts if p != "ref=cuda_ref"]
     return "; ".join(parts) if parts else detail
 
-def _record_validation(results, name, module, dtype, mode, t0, ok, detail, launch=None, warmup=1, rep=1, ms=None):
+def _record_validation(results, name, module, dtype, mode, t0, ok, detail,
+                       launch=None, warmup=1, rep=1, ms=None, energy_mj_per_call=None):
     if ok and launch is not None and ms is None:
         ms = benchmark_quietly(launch, warmup, rep)
     _record(
         results, name, module, dtype, mode,
         TestResult.PASS if ok else TestResult.FAIL,
         t0, ms=ms if ok else None, detail=_validation_detail(ok, detail),
+        energy_mj_per_call=energy_mj_per_call if ok else None,
     )

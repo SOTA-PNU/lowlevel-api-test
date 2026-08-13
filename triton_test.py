@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import math
 import os
 import time
 import torch
@@ -33,6 +34,12 @@ Examples:
     parser.add_argument("--block", type=int, default=256)
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=100)
+    parser.add_argument(
+        "--energy-seconds", type=float, default=3.0,
+        help=(
+            "Minimum sustained NPU power-sampling window; 0 disables mJ/call."
+        ),
+    )
     parser.add_argument("--local-triton", action="store_true")
     parser.add_argument(
         "--soft-fail-results",
@@ -45,6 +52,13 @@ Examples:
     )
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args()
+    if not math.isfinite(args.energy_seconds) or args.energy_seconds < 0:
+        parser.error("--energy-seconds must be finite and >= 0")
+
+    if args.warmup < 0:
+        parser.error("--warmup must be >= 0")
+    if args.rep < 1:
+        parser.error("--rep must be >= 1")
 
     if args.list:
         print("Available real execution modules:")

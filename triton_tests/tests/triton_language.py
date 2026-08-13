@@ -28,6 +28,9 @@ tl = None
 TL_TENSOR_DESC = {
     "make_tensor_descriptor","load_tensor_descriptor","store_tensor_descriptor"
 }
+TL_TENSOR_DESC_RUNTIME = TL_TENSOR_DESC | {
+    "tensor_descriptor", "tensor_descriptor_type"
+}
 
 def configure(triton_module, tl_module) -> None:
     global triton, tl
@@ -54,9 +57,15 @@ def _run_upstream_only_tl_ops(args):
     block = args.block
     grid = (triton.cdiv(n, block),)
     device = _runtime_device()
-    x_fp = torch.randn(n, device=device)
-    x_int = torch.randint(1, 1000, (n,), device=device, dtype=torch.int32)
-    y_int = torch.randint(1, 1000, (n,), device=device, dtype=torch.int32)
+    input_dtype = positive_input(device).dtype
+    dtype = input_dtype_label(input_dtype)
+    x_fp = torch.randn(n, device=device, dtype=input_dtype)
+    x_int = torch.randint(
+        1, 1000, (n,), device=device, dtype=torch.int32
+    )
+    y_int = torch.randint(
+        1, 1000, (n,), device=device, dtype=torch.int32
+    )
     requested = {
         part.strip() for part in args.only.split(",") if part.strip()
     }
@@ -79,29 +88,53 @@ def _run_upstream_only_tl_ops(args):
     for name in symbols:
         t0 = time.time()
         key = f"tl.{name}"
+        op_dtype = dtype
         try:
-            if name in TL_TENSOR_DESC:
-                _record(
-                    results, key, "tl", "-", "kernel", TestResult.ERROR, t0,
-                    detail="tensor_descriptor execution adapter is not implemented",
-                )
-                continue
+            if name in TL_TENSOR_DESC_RUNTIME:
+                desc_rows = desc_cols = 64
+                block_m = block_n = 16
 
-            if name == "reduce_or":
+                def descriptor_allocator(size, alignment, stream):
+                    return torch.empty(
+                        size, device=device, dtype=torch.int8
+                    )
+
+                triton.set_allocator(descriptor_allocator)
+                x_desc = torch.randn(
+                    (desc_rows, desc_cols), device=device,
+                    dtype=input_dtype,
+                )
+                out = torch.empty_like(x_desc)
+                desc_grid = (
+                    triton.cdiv(desc_rows, block_m),
+                    triton.cdiv(desc_cols, block_n),
+                )
+                launch = _make_launch(
+                    tensor_descriptor_identity_kernel,
+                    desc_grid,
+                    x_desc, out, desc_rows, desc_cols,
+                    BLOCK_M=block_m, BLOCK_N=block_n,
+                )
+                run_quietly(launch, _sync_device)
+                ok, detail = valid(
+                    out, x_desc, f"upstream-only:{name}"
+                )
+                detail += "; descriptor_make_load_store=PASS"
+            elif name == "reduce_or":
+                op_dtype = input_dtype_label(x_int.dtype)
                 out = torch.empty(grid[0], device=device, dtype=torch.bool)
                 launch = _make_launch(
                     reduce_or_kernel, grid, x_int, out, n, BLOCK=block
                 )
                 run_quietly(launch, _sync_device)
                 padded = torch.zeros(
-                    grid[0] * block, device=device, dtype=torch.int32
+                    grid[0] * block, device=device, dtype=x_int.dtype
                 )
                 padded[:n] = x_int
                 expected = (padded.reshape(grid[0], block) > 0).any(dim=1)
                 ok, detail = valid(
                     out, expected, "upstream-only:reduce_or"
                 )
-                dtype = "bool"
             elif name == "topk":
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(
@@ -109,7 +142,8 @@ def _run_upstream_only_tl_ops(args):
                 )
                 run_quietly(launch, _sync_device)
                 padded = torch.full(
-                    (grid[0] * block,), -float("inf"), device=device
+                    (grid[0] * block,), -float("inf"), device=device,
+                    dtype=input_dtype,
                 )
                 padded[:n] = x_fp
                 expected = torch.sort(
@@ -118,9 +152,7 @@ def _run_upstream_only_tl_ops(args):
                 ).values.reshape(-1)[:n]
                 ok, detail = valid(
                     out, expected, "upstream-only:topk",
-                    rtol=1e-3, atol=1e-3,
                 )
-                dtype = "fp32"
             elif name == "bitonic_merge":
                 half = block // 2
                 pattern = torch.cat((
@@ -128,7 +160,7 @@ def _run_upstream_only_tl_ops(args):
                     torch.arange(
                         block - 1, half - 1, -1, device=device
                     ),
-                )).float()
+                )).to(input_dtype)
                 values = pattern.repeat(grid[0])[:n]
                 out = torch.empty_like(values)
                 launch = _make_launch(
@@ -137,7 +169,8 @@ def _run_upstream_only_tl_ops(args):
                 )
                 run_quietly(launch, _sync_device)
                 padded = torch.full(
-                    (grid[0] * block,), float("inf"), device=device
+                    (grid[0] * block,), float("inf"), device=device,
+                    dtype=input_dtype,
                 )
                 padded[:n] = values
                 expected = torch.sort(
@@ -146,8 +179,8 @@ def _run_upstream_only_tl_ops(args):
                 ok, detail = valid(
                     out, expected, "upstream-only:bitonic_merge"
                 )
-                dtype = "fp32"
             elif name == "map_elementwise":
+                op_dtype = input_dtype_label(x_int.dtype)
                 out = torch.empty_like(x_int)
                 launch = _make_launch(
                     map_elementwise_kernel, grid, x_int, y_int, out, n,
@@ -164,20 +197,19 @@ def _run_upstream_only_tl_ops(args):
                 ok, detail = valid(
                     out, expected, "upstream-only:map_elementwise"
                 )
-                dtype = "int32"
             elif name in UPSTREAM_ONLY_META_OPS:
-                validate_meta_symbol(name, tl)
+                validate_meta_symbol(name, tl, input_dtype)
                 out = torch.empty_like(x_fp)
                 launch = _make_launch(
                     upstream_meta_kernel, grid, x_fp, out, n,
                     BLOCK=block, MODE=TL_META_COMPILE[name],
                 )
                 run_quietly(launch, _sync_device)
+                expected = x_fp + 7 if name == "constexpr_type" else x_fp
                 ok, detail = valid(
-                    out, x_fp, f"upstream-only:{name}"
+                    out, expected, f"upstream-only:{name}"
                 )
                 detail += "; target_result=N/A; sentinel_exec=PASS"
-                dtype = "fp32"
             else:
                 _record(
                     results, key, "tl", "-", "kernel", TestResult.ERROR, t0,
@@ -186,12 +218,12 @@ def _run_upstream_only_tl_ops(args):
                 continue
 
             _record_validation(
-                results, key, "tl", dtype, "kernel", t0, ok, detail,
+                results, key, "tl", op_dtype, "kernel", t0, ok, detail,
                 launch, args.warmup, args.rep,
             )
         except Exception as exc:
             _record(
-                results, key, "tl", "-", "kernel", TestResult.ERROR, t0,
+                results, key, "tl", op_dtype, "kernel", TestResult.ERROR, t0,
                 detail=f"{type(exc).__name__}: {exc}"[:1000],
             )
     return results
@@ -264,7 +296,36 @@ _META_SIGNATURES = {
     "map_elementwise": {"args"},
 }
 
-def validate_meta_symbol(name, tl_module=None):
+_TORCH_DTYPE_SPECS = {
+    torch.float16: ("fp16", "float16"),
+    torch.bfloat16: ("bf16", "bfloat16"),
+    torch.float32: ("fp32", "float32"),
+    torch.float64: ("fp64", "float64"),
+    torch.int8: ("int8", "int8"),
+    torch.int16: ("int16", "int16"),
+    torch.int32: ("int32", "int32"),
+    torch.int64: ("int64", "int64"),
+    torch.uint8: ("uint8", "uint8"),
+    torch.bool: ("bool", "int1"),
+}
+
+def input_dtype_label(dtype: torch.dtype) -> str:
+    spec = _TORCH_DTYPE_SPECS.get(dtype)
+    return spec[0] if spec else str(dtype).removeprefix("torch.")
+
+def _language_dtype(language, torch_dtype: torch.dtype):
+    spec = _TORCH_DTYPE_SPECS.get(torch_dtype)
+    if spec is None:
+        raise TypeError(f"unsupported configured input dtype: {torch_dtype}")
+    dtype_name, attribute = spec
+    value = getattr(language, attribute, None)
+    if value is None:
+        raise TypeError(
+            f"triton.language.{attribute} is unavailable for {dtype_name}"
+        )
+    return dtype_name, value
+
+def validate_meta_symbol(name, tl_module=None, torch_dtype=torch.float32):
     """Validate a non-runtime tl export without pretending it executed on-device."""
     language = tl_module or tl
     if language is None or not hasattr(language, name):
@@ -273,23 +334,29 @@ def validate_meta_symbol(name, tl_module=None):
     if not callable(obj):
         raise TypeError(f"triton.language.{name} is not callable")
 
-    float32 = getattr(language, "float32", None)
+    dtype_name, configured_type = _language_dtype(language, torch_dtype)
     if name == "PropagateNan":
         members = getattr(obj, "__members__", None)
         if not members:
             raise TypeError("PropagateNan has no enum members")
         return "validated enum contract: " + ", ".join(sorted(members))
     if name == "dtype":
-        value = obj("fp32")
-        if float32 is not None and value != float32:
-            raise TypeError("dtype('fp32') does not match tl.float32")
-        return "validated dtype('fp32')"
+        value = obj(dtype_name)
+        if value != configured_type:
+            raise TypeError(
+                f"dtype('{dtype_name}') does not match configured dtype"
+            )
+        return f"validated dtype('{dtype_name}')"
     if name == "str_to_ty":
         parameters = inspect.signature(obj).parameters
-        value = obj("fp32", None) if "c" in parameters else obj("fp32")
-        if float32 is not None and value != float32:
-            raise TypeError("str_to_ty('fp32') does not match tl.float32")
-        return "validated str_to_ty('fp32')"
+        value = (
+            obj(dtype_name, None) if "c" in parameters else obj(dtype_name)
+        )
+        if value != configured_type:
+            raise TypeError(
+                f"str_to_ty('{dtype_name}') does not match configured dtype"
+            )
+        return f"validated str_to_ty('{dtype_name}')"
     if name == "constexpr":
         value = obj(64)
         if getattr(value, "value", None) != 64:
@@ -304,13 +371,13 @@ def validate_meta_symbol(name, tl_module=None):
         obj()
         return "validated const annotation construction"
     if name == "block_type":
-        obj(float32, [16])
-        return "validated block_type(fp32, [16]) construction"
+        obj(configured_type, [16])
+        return f"validated block_type({dtype_name}, [16]) construction"
     if name == "pointer_type":
-        obj(float32, address_space=1)
-        return "validated pointer_type(fp32) construction"
+        obj(configured_type, address_space=1)
+        return f"validated pointer_type({dtype_name}) construction"
     if name == "function_type":
-        obj([float32], [float32])
+        obj([configured_type], [configured_type])
         return "validated function_type construction"
     if name == "slice":
         value = obj(0, 16, 1)
@@ -318,7 +385,7 @@ def validate_meta_symbol(name, tl_module=None):
             raise TypeError("slice did not preserve its bounds")
         return "validated slice(0, 16, 1) construction"
     if name == "tuple_type":
-        value = obj([float32, float32])
+        value = obj([configured_type, configured_type])
         if len(value.types) != 2:
             raise TypeError("tuple_type did not preserve its element types")
         return "validated tuple_type construction"
@@ -483,7 +550,7 @@ def reduce_or_kernel(x_ptr, out_ptr, size,
                      BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < size
-    values = tl.load(x_ptr + offs, mask=mask, other=0) > 0
+    values = tl.load(x_ptr + offs, mask=mask, other=0)
     tl.store(out_ptr + tl.program_id(0),
              tl.reduce_or(values, axis=0))
 
@@ -518,6 +585,30 @@ def map_elementwise_kernel(x_ptr, y_ptr, out_ptr, size,
     tl.store(out_ptr + offs, mapped, mask=mask)
 
 @triton.jit
+def tensor_descriptor_identity_kernel(
+    x_ptr, out_ptr, rows, cols,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+):
+    x_desc = tl.make_tensor_descriptor(
+        x_ptr,
+        shape=[rows, cols],
+        strides=[cols, 1],
+        block_shape=[BLOCK_M, BLOCK_N],
+    )
+    out_desc = tl.make_tensor_descriptor(
+        out_ptr,
+        shape=[rows, cols],
+        strides=[cols, 1],
+        block_shape=[BLOCK_M, BLOCK_N],
+    )
+    offsets = [
+        tl.program_id(0) * BLOCK_M,
+        tl.program_id(1) * BLOCK_N,
+    ]
+    block = tl.load_tensor_descriptor(x_desc, offsets)
+    tl.store_tensor_descriptor(out_desc, offsets, block)
+
+@triton.jit
 def upstream_meta_kernel(x_ptr, out_ptr, size,
                          BLOCK: tl.constexpr,
                          MODE: tl.constexpr):
@@ -528,21 +619,23 @@ def upstream_meta_kernel(x_ptr, out_ptr, size,
         wrapped = tl.condition(x == x, disable_licm=True)
         out = tl.where(wrapped.condition, x, x)
     elif MODE == 9:
-        meta = tl.constexpr_type(7)
-        _ = meta
-        out = x
+        # Let the frontend construct and propagate constexpr_type instead of
+        # invoking its compiler-internal constructor from JIT user code.
+        marker: tl.constexpr = 7
+        out = x + marker
     elif MODE == 10:
-        section = tl.slice(0, BLOCK, 1)
-        out = x + section.start + section.step - 1
+        # Slice syntax makes the frontend construct the internal slice object.
+        out = x[:]
     elif MODE == 12:
         values = tl.tuple([x, x])
         out = values[0]
     elif MODE == 13:
-        value_type = tl.tuple_type([x.type, x.type])
-        values = tl.tuple([x, x], value_type)
-        out = values[0]
+        # Tuple construction/unpacking exercises inferred tuple_type without
+        # calling its compiler-internal constructor directly.
+        first, second = (x, x + 1)
+        out = first + second - x - 1
     elif MODE == 14:
-        block_type = tl.block_type(tl.float32, [BLOCK])
+        block_type = tl.block_type(x.dtype, [BLOCK])
         scalar_tuple = tl.tuple_type([tl.int64])
         descriptor_type = tl.tensor_descriptor_type(
             block_type, scalar_tuple, scalar_tuple
@@ -747,7 +840,7 @@ def shared_zeros(
         block_shape=(batch, rows, cols), order=(2, 1, 0),
     )
     x = tl.load(x_block)
-    zeros = tl.zeros((batch, rows, cols), tl.float32)
+    zeros = tl.zeros((batch, rows, cols), x.dtype)
     # Use zeros as a numeric operand while retaining a non-constant output graph.
     tl.store(out_block, tl.exp(tl.maximum(x, zeros)))
 
@@ -774,7 +867,7 @@ def shared_shape(
         x = tl.load(x_block)
         reduced = tl.sum(x, axis=2, keep_dims=True)
         if mode == 0:
-            zeros = tl.zeros((batch, rows, cols), tl.float32)
+            zeros = tl.zeros((batch, rows, cols), x.dtype)
             out, _ = tl.broadcast(reduced, zeros)
         else:
             out = tl.broadcast_to(reduced, (batch, rows, cols))
@@ -948,7 +1041,7 @@ def shared_creation(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         base = tl.arange(0, cols)[None, None, :]
         out = x * 0.0 + base
     elif mode == 1:
-        out = tl.exp(x + tl.full((batch, rows, cols), 3.0, tl.float32))
+        out = tl.exp(x + tl.full((batch, rows, cols), 3.0, x.dtype))
     elif mode == 2:
         out = tl.exp(x + tl.zeros_like(x))
     else:
@@ -980,7 +1073,7 @@ def shared_program(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                    cols: tl.constexpr, mode: tl.constexpr):
     ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    zeros = tl.zeros((batch, rows, cols), tl.float32)
+    zeros = tl.zeros((batch, rows, cols), out_ptr.dtype.element_ty)
     out = zeros + (tl.program_id(0) if mode == 0 else tl.num_programs(0))
     tl.store(ob, out)
 
@@ -993,7 +1086,9 @@ def shared_npu_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         tl.debug_barrier()
     else:
         tl.device_assert(True, "device_assert smoke")
-    tl.store(ob, tl.zeros((batch, rows, cols), tl.float32))
+    tl.store(
+        ob, tl.zeros((batch, rows, cols), out_ptr.dtype.element_ty)
+    )
 
 @triton.jit
 def shared_random(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
@@ -1098,14 +1193,14 @@ def shared_arg_reduce(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
     elif mode == 1:
         r = tl.argmin(x, axis=2, keep_dims=True)
     else:
-        r = tl.xor_sum(x.to(tl.int32), axis=2, keep_dims=True)
-    tl.store(ob, x * 0.0 + r)
+        r = tl.xor_sum(x, axis=2, keep_dims=True)
+    tl.store(ob, x * 0 + r)
 
 @triton.jit
 def shared_atomic(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                   cols: tl.constexpr, mode: tl.constexpr):
     offs = tl.arange(0, cols)[None, None, :] + tl.arange(0, rows)[None, :, None] * cols
-    vals = (offs.to(tl.int32) & 7) + 1
+    vals = ((offs & 7) + 1).to(x_ptr.dtype.element_ty)
     if mode == 0: old = tl.atomic_add(x_ptr + offs, vals)
     elif mode == 1: old = tl.atomic_max(x_ptr + offs, vals)
     elif mode == 2: old = tl.atomic_min(x_ptr + offs, vals)
@@ -1171,9 +1266,9 @@ def shared_npu_misc(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constex
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
     offs = tl.arange(0, cols)[None, None, :] + tl.arange(0, rows)[None, :, None] * cols
     if mode == 0:
-        i, j = tl.swizzle2d(offs // cols, offs % cols, rows, cols, 4); out = (i * cols + j).to(tl.float32)
+        i, j = tl.swizzle2d(offs // cols, offs % cols, rows, cols, 4); out = (i * cols + j).to(out_ptr.dtype.element_ty)
     else:
-        x = tl.load(x_ptr + offs).to(tl.uint32); y = tl.load(y_ptr + offs).to(tl.uint32); out = tl.umulhi(x, y).to(tl.float32)
+        x = tl.load(x_ptr + offs); y = tl.load(y_ptr + offs); out = tl.umulhi(x, y)
     tl.store(ob, out)
 
 @triton.jit
@@ -1205,7 +1300,7 @@ def shared_meta_runtime(x_ptr, y_ptr, out_ptr, batch: tl.constexpr,
         index = tl.broadcast_to(index, (batch, rows, cols))
         out = tl.gather(x, index, axis=2)
     else:
-        counts = tl.histogram(tl.ravel(x).to(tl.int32), cols)
+        counts = tl.histogram(tl.ravel(x), cols)
         out = x * 0 + counts[None, None, :]
     tl.store(ob, out)
 
@@ -1217,7 +1312,7 @@ def shared_block_type(x_ptr, out_ptr, batch: tl.constexpr,
     ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
     x = tl.load(xb)
-    expected_type = tl.block_type(tl.float32, [1, 64, 64])
+    expected_type = tl.block_type(x.dtype, [1, 64, 64])
     _ = expected_type
     tl.store(ob, tl.exp(x))
 
@@ -1386,6 +1481,8 @@ def run_common_shared_suite(args, triton_module, tl_module):
     results = {}
     device = _runtime_device()
     ops = selected_ops(args.only)
+    configured_dtype = positive_input(device).dtype
+    configured_dtype_label = input_dtype_label(configured_dtype)
     print(f"\n[{device.upper()}] common Triton JIT kernel coverage: {len(ops)} ops")
 
     for name in ops:
@@ -1402,7 +1499,8 @@ def run_common_shared_suite(args, triton_module, tl_module):
                 )
             elif name == "zeros":
                 x = torch.linspace(
-                    -1.0, 1.0, RBLN_BATCH * ROWS * COLS, device=device
+                    -1.0, 1.0, RBLN_BATCH * ROWS * COLS,
+                    device=device, dtype=x.dtype,
                 ).reshape(RBLN_BATCH, ROWS, COLS)
                 kernel, kernel_args, expected = (
                     kernels.zeros,
@@ -1466,12 +1564,20 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     expected = torch.exp(x)
                 else:
                     x = positive_input(device)[0].contiguous()
-                    out = torch.empty((COLS, ROWS), device=device)
+                    out = torch.empty(
+                        (COLS, ROWS), device=device, dtype=x.dtype
+                    )
                     expected = x.t().contiguous()
                 kernel, kernel_args = kernels.shape, (x, out, RBLN_BATCH, ROWS, COLS, mode)
             elif name == "dot":
-                a = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), device=device)
-                b = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), device=device)
+                a = torch.randn(
+                    (RBLN_BATCH, DOT_SIZE, DOT_SIZE),
+                    device=device, dtype=x.dtype,
+                )
+                b = torch.randn(
+                    (RBLN_BATCH, DOT_SIZE, DOT_SIZE),
+                    device=device, dtype=x.dtype,
+                )
                 out = torch.empty_like(a)
                 kernel, kernel_args, expected = (
                     kernels.dot,
@@ -1480,7 +1586,11 @@ def run_common_shared_suite(args, triton_module, tl_module):
                 )
             elif name in MEMORY_MODES:
                 if name == "advance":
-                    x = torch.rand((RBLN_BATCH, ROWS, COLS * 2), device=device) + 0.25
+                    x = torch.rand(
+                        (RBLN_BATCH, ROWS, COLS * 2),
+                        device=device,
+                        dtype=x.dtype,
+                    ) + 0.25
                 out = torch.empty_like(x)
                 kernel, kernel_args, expected = (
                     kernels.memory,
@@ -1502,7 +1612,8 @@ def run_common_shared_suite(args, triton_module, tl_module):
                         RBLN_BATCH * ROWS * COLS,
                         device=device, dtype=torch.int32,
                     ).reshape(RBLN_BATCH, ROWS, COLS)
-                out = torch.empty_like(x, dtype=torch.float32)
+                out_dtype = torch.float32 if name == "cast" else x.dtype
+                out = torch.empty_like(x, dtype=out_dtype)
                 expected = {
                     "cast": x.to(torch.float32),
                     "clamp": torch.clamp(x, -0.5, 0.5),
@@ -1591,6 +1702,11 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, y, out, RBLN_BATCH, ROWS, COLS, LAYOUT_MODES[name],
                 )
             elif name in ARG_REDUCE_MODES:
+                if name == "xor_sum":
+                    x = torch.randint(
+                        0, 1 << 16, x.shape,
+                        device=device, dtype=torch.int32,
+                    )
                 out = torch.empty_like(x)
                 if name == "argmax":
                     reduced = torch.argmax(x, dim=2, keepdim=True)
@@ -1603,7 +1719,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
                         reduced = torch.bitwise_xor(
                             reduced, xi[:, :, i:i + 1]
                         )
-                expected = reduced.expand_as(x).float()
+                expected = reduced.expand_as(x).to(x.dtype)
                 kernel, kernel_args = kernels.arg_reduce, (
                     x, out, RBLN_BATCH, ROWS, COLS, ARG_REDUCE_MODES[name],
                 )
@@ -1633,14 +1749,24 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, y, out, RBLN_BATCH, ROWS, COLS, NPU_SHAPE_MODES[name],
                 )
             elif name in NPU_MISC_OPS:
-                y = positive_input(device)
+                if name == "umulhi":
+                    x = torch.randint(
+                        1 << 29, 1 << 30, x.shape,
+                        device=device, dtype=torch.int32,
+                    )
+                    y = torch.randint(
+                        1 << 29, 1 << 30, x.shape,
+                        device=device, dtype=torch.int32,
+                    )
+                else:
+                    y = positive_input(device)
                 out = torch.empty_like(x)
                 if name == "swizzle2d":
                     expected = swizzle2d_reference(device)
                 else:
                     expected = (
                         (x.to(torch.int64) * y.to(torch.int64)) >> 32
-                    ).float()
+                    ).to(torch.int32)
                 kernel, kernel_args = kernels.npu_misc, (
                     x, y, out, RBLN_BATCH, ROWS, COLS, NPU_MISC_OPS[name],
                 )
@@ -1666,13 +1792,15 @@ def run_common_shared_suite(args, triton_module, tl_module):
                 else:
                     x = (
                         torch.arange(
-                            RBLN_BATCH * ROWS * COLS, device=device
+                            RBLN_BATCH * ROWS * COLS, device=device,
+                            dtype=torch.int32,
                         ) % COLS
-                    ).reshape(RBLN_BATCH, ROWS, COLS).float()
+                    ).reshape(RBLN_BATCH, ROWS, COLS)
+                    y = torch.zeros_like(x)
                     counts = torch.bincount(
                         x.reshape(-1).to(torch.int64), minlength=COLS
                     )
-                    expected = counts.reshape(1, 1, COLS).expand_as(x).float()
+                    expected = counts.reshape(1, 1, COLS).expand_as(x).to(x.dtype)
                 out = torch.empty_like(x)
                 kernel, kernel_args = kernels.meta_runtime, (
                     x, y, out, RBLN_BATCH, ROWS, COLS,
@@ -1685,6 +1813,8 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS,
                 )
             elif name == "dot_scaled":
+                # dot_scaled consumes encoded FP8 operands and E8M0 scales.
+                # Zero is the all-zero E4M3 bit pattern; 127 encodes scale 1.
                 a = torch.zeros((16, 64), device=device, dtype=torch.uint8)
                 b = torch.zeros((64, 16), device=device, dtype=torch.uint8)
                 a_scale = torch.full(
@@ -1699,7 +1829,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     a, b, a_scale, b_scale, out, 16, 16, 64,
                 )
             elif name in TL_META_COMPILE:
-                validate_meta_symbol(name, tl)
+                validate_meta_symbol(name, tl, x.dtype)
                 out = torch.empty_like(x)
                 expected = (
                     torch.exp(x) if name == "inline_asm_elementwise" else None
@@ -1729,12 +1859,12 @@ def run_common_shared_suite(args, triton_module, tl_module):
                 out = kernel_args[4]
             else:
                 out = kernel_args[1]
+            tolerance = 2e-1 if name == "dot" else 2e-2
 
             def launch():
                 kernel[(1,)](*kernel_args)
 
             run_quietly(launch, _sync_device)
-            tolerance = 2e-1 if name == "dot" else 2e-2
             if expected is None:
                 ok = bool(torch.isfinite(out).all())
                 detail = (
@@ -1760,12 +1890,15 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     reference="torch",
                 )
             _record_validation(
-                results, key, "tl", "fp32", "exec+perf", t0, ok, detail,
+                results, key, "tl",
+                input_dtype_label(kernel_args[0].dtype),
+                "exec+perf", t0, ok, detail,
                 launch, args.warmup, args.rep,
             )
         except Exception as exc:
             _record(
-                results, key, "tl", "-", "exec", TestResult.ERROR, t0,
+                results, key, "tl", configured_dtype_label,
+                "exec", TestResult.ERROR, t0,
                 detail=str(exc)[:1000],
             )
     return results

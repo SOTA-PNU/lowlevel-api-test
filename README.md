@@ -176,7 +176,24 @@ python triton_test.py --list
 | **Matrix operations** | `dot` and related matrix primitives |
 | **Program and compiler helpers** | program IDs, hints, and control helpers |
 
-Every successful NPU case compiles and invokes a real custom kernel. The report therefore uses `exec` for kernel success and omits a separate mode column. `accuracy=PASS` means the target API has a numeric or invariant result that matched its reference; `accuracy=N/A` means a type, annotation, hint, or static-debug API has no target value to compare, even though its containing sentinel kernel ran. Helpers with observable runtime behavior (`PropagateNan`, `range`, `static_range`, `device_print`, `gather`, `histogram`, `dot_scaled`, `bitonic_merge`, and `map_elementwise`) run real kernels with policy, sentinel, or PyTorch-reference validation. Type/meta exports such as `const`, `constexpr`, `dtype`, `block_type`, `pointer_type`, `function_type`, `condition`, `slice`, tuple types, and tensor-descriptor types are instantiated and used inside a JIT compile context. CUDA/CPU also execute a backend-specific `inline_asm_elementwise` identity probe. Constructor/signature validation alone is never a correctness PASS; a missing compile adapter is reported as ERROR.
+Every successful NPU case compiles and invokes a real custom kernel. After validation, the worker applies `--warmup` and `--rep` and reports the average RBLN device time in the `ms` column (`exec+perf`). On RBLN versions that do not expose device timer reports, the same column contains synchronous host wall time and the detail is marked `perf=host-wall-fallback`; NPU `GB/s` remains blank because transfer semantics vary by operation. `accuracy=PASS` means the target API has a numeric or invariant result that matched its reference; `accuracy=N/A` means a type, annotation, hint, or static-debug API has no target value to compare, even though its containing sentinel kernel ran. Helpers with observable runtime behavior (`PropagateNan`, `range`, `static_range`, `device_print`, `gather`, `histogram`, `dot_scaled`, `bitonic_merge`, and `map_elementwise`) run real kernels with policy, sentinel, or PyTorch-reference validation. Type/meta exports such as `const`, `constexpr`, `dtype`, `block_type`, `pointer_type`, `function_type`, `condition`, `slice`, tuple types, and tensor-descriptor types are instantiated and used inside a JIT compile context. CUDA/CPU also execute a backend-specific `inline_asm_elementwise` identity probe. Constructor/signature validation alone is never a correctness PASS; a missing compile adapter is reported as ERROR.
+
+The `mJ/call` column is populated for validated NPU runtime kernels when
+RBLN card-power telemetry is available. Each worker records a fresh idle
+baseline for its physical card immediately before the sustained load, then
+repeatedly invokes the kernel for at least `--energy-seconds` (default: 3
+seconds). Idle and loaded power must each provide three observations spaced at
+least 1.05 seconds apart whose range is within 5%; unstable measurements are
+left blank. Logical NPU entries are deduplicated by physical-card SID. If any
+other process shares that physical card, `mJ/call` is left blank and the detail
+is marked `energy_warning=shared-card`. The reported value is
+`(loaded power - idle power) * sustained-loop elapsed / calls * 1000`:
+idle-subtracted card energy per API call, including runtime gaps between device
+executions. It is therefore not the pure-device `ms` value multiplied by a
+single power snapshot. Increase `--energy-seconds` for a longer power window
+or use `--energy-seconds 0` to disable this measurement. Unavailable telemetry
+leaves the value blank and adds an `energy_warning` without failing the
+functional test.
 
 ### LIBDEVICE (197 operators)
 
