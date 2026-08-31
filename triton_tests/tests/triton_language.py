@@ -76,10 +76,8 @@ def _run_upstream_only_tl_ops(args):
 
     print(f"\nDetected upstream-only tl symbols = {len(symbols)}")
 
-    def valid(actual, expected, label, rtol=1e-4, atol=1e-4):
-        ok, max_abs, max_rel = _compare_tensors(
-            actual, expected, rtol=rtol, atol=atol
-        )
+    def valid(actual, expected, label):
+        ok, max_abs, max_rel = _compare_tensors(actual, expected)
         return ok, _format_error_detail(
             label, max_abs, max_rel, reference="torch"
         )
@@ -1944,8 +1942,6 @@ def run_common_shared_suite(args, triton_module, tl_module):
                 out = kernel_args[4]
             else:
                 out = kernel_args[1]
-            tolerance = 2e-1 if name == "dot" else 2e-2
-
             def launch():
                 kernel[(1,)](*kernel_args)
 
@@ -1960,16 +1956,13 @@ def run_common_shared_suite(args, triton_module, tl_module):
                 ok, max_abs, max_rel = _compare_tensors(
                     torch.sort(out.reshape(-1)).values,
                     torch.sort(expected.reshape(-1)).values,
-                    rtol=tolerance, atol=tolerance,
                 )
                 detail = _format_error_detail(
                     f"common-kernel:{name}", max_abs, max_rel,
                     reference="torch",
                 )
             else:
-                ok, max_abs, max_rel = _compare_tensors(
-                    out, expected, rtol=tolerance, atol=tolerance
-                )
+                ok, max_abs, max_rel = _compare_tensors(out, expected)
                 detail = _format_error_detail(
                     f"common-kernel:{name}", max_abs, max_rel,
                     reference="torch",

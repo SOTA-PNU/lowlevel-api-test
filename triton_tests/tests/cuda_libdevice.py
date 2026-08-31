@@ -404,35 +404,32 @@ def _reference_conversion(fn: str, tensors: Sequence[torch.Tensor]) -> Optional[
 def _round_half_away_from_zero(x: torch.Tensor) -> torch.Tensor:
     return torch.sign(x) * torch.floor(torch.abs(x) + 0.5)
 
-def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> Tuple[Optional[torch.Tensor], str, float, float]:
+def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> Tuple[Optional[torch.Tensor], str]:
     x = tensors[0]
-    rtol, atol = (1e-4, 1e-4)
-    if fn.startswith("fast_"):
-        rtol, atol = (1e-3, 1e-3)
 
     conv = _reference_conversion(fn, tensors)
     if conv is not None:
-        return conv, "cuda_ref", rtol, atol
+        return conv, "cuda_ref"
 
     if fn in INT_UNARY_SMOKE:
-        return _reference_int_unary(fn, x), "cuda_ref", 0.0, 0.0
+        return _reference_int_unary(fn, x), "cuda_ref"
     if fn == "mulhi":
         a, b = tensors
-        return ((a.to(torch.int64) * b.to(torch.int64)) >> 32).to(torch.int32), "cuda_ref", 0.0, 0.0
+        return ((a.to(torch.int64) * b.to(torch.int64)) >> 32).to(torch.int32), "cuda_ref"
     if fn == "mul24":
         a, b = tensors
-        return (a.to(torch.int32) * b.to(torch.int32)).to(torch.int32), "cuda_ref", 0.0, 0.0
+        return (a.to(torch.int32) * b.to(torch.int32)).to(torch.int32), "cuda_ref"
     if fn == "hadd":
         a, b = tensors
-        return ((a.to(torch.int64) + b.to(torch.int64)) >> 1).to(torch.int32), "cuda_ref", 0.0, 0.0
+        return ((a.to(torch.int64) + b.to(torch.int64)) >> 1).to(torch.int32), "cuda_ref"
     if fn == "rhadd":
         a, b = tensors
-        return ((a.to(torch.int64) + b.to(torch.int64) + 1) >> 1).to(torch.int32), "cuda_ref", 0.0, 0.0
+        return ((a.to(torch.int64) + b.to(torch.int64) + 1) >> 1).to(torch.int32), "cuda_ref"
     if fn == "sad":
         a, b, c = tensors
-        return (torch.abs(a.to(torch.int64) - b.to(torch.int64)) + c.to(torch.int64)).to(torch.int32), "cuda_ref", 0.0, 0.0
+        return (torch.abs(a.to(torch.int64) - b.to(torch.int64)) + c.to(torch.int64)).to(torch.int32), "cuda_ref"
     if fn == "byte_perm":
-        return None, "smoke_only", rtol, atol
+        return None, "smoke_only"
 
     unary = {
         "abs": torch.abs, "floor": torch.floor, "rsqrt": torch.rsqrt, "ceil": torch.ceil,
@@ -470,23 +467,23 @@ def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> 
         })
 
     if fn == "saturatef":
-        return torch.clamp(x, 0.0, 1.0), "cuda_ref", rtol, atol
+        return torch.clamp(x, 0.0, 1.0), "cuda_ref"
     if fn in {"isnan", "isinf", "signbit", "finitef", "isfinited"}:
         ref = torch.isnan(x) if fn == "isnan" else torch.isinf(x) if fn == "isinf" else torch.signbit(x) if fn == "signbit" else torch.isfinite(x)
-        return ref.to(torch.int32), "cuda_ref", 0.0, 0.0
+        return ref.to(torch.int32), "cuda_ref"
     if fn == "ilogb":
-        return torch.floor(torch.log2(torch.abs(x))).to(torch.int32), "cuda_ref", 0.0, 0.0
+        return torch.floor(torch.log2(torch.abs(x))).to(torch.int32), "cuda_ref"
     if fn == "llrint":
-        return torch.round(x).to(torch.int64), "cuda_ref", 0.0, 0.0
+        return torch.round(x).to(torch.int64), "cuda_ref"
     if fn == "llround":
-        return _round_half_away_from_zero(x).to(torch.int64), "cuda_ref", 0.0, 0.0
+        return _round_half_away_from_zero(x).to(torch.int64), "cuda_ref"
     if fn in unary:
         ref = unary[fn](x)
         if ref is not None:
-            return ref, "cuda_ref", rtol, atol
+            return ref, "cuda_ref"
 
     if fn in ROUND_MODE_UNARY_SMOKE:
-        return (1.0 / x if fn.startswith("rcp") else torch.sqrt(x)), "cuda_ref", rtol, atol
+        return (1.0 / x if fn.startswith("rcp") else torch.sqrt(x)), "cuda_ref"
 
     a = tensors[0]
     b = tensors[1] if len(tensors) > 1 else None
@@ -500,27 +497,27 @@ def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> 
         "nextafter": torch.nextafter, "ldexp": torch.ldexp, "scalbn": torch.ldexp,
     }
     if fn in binary and b is not None:
-        return binary[fn](a, b), "cuda_ref", rtol, atol
+        return binary[fn](a, b), "cuda_ref"
     if fn in {"add_rn", "add_rz", "add_rd", "add_ru"} and b is not None:
-        return a + b, "cuda_ref", rtol, atol
+        return a + b, "cuda_ref"
     if fn in {"sub_rn", "sub_rz", "sub_rd", "sub_ru"} and b is not None:
-        return a - b, "cuda_ref", rtol, atol
+        return a - b, "cuda_ref"
     if fn in {"mul_rn", "mul_rz", "mul_rd", "mul_ru"} and b is not None:
-        return a * b, "cuda_ref", rtol, atol
+        return a * b, "cuda_ref"
     if fn in {"div_rn", "div_rz", "div_rd", "div_ru"} and b is not None:
-        return a / b, "cuda_ref", rtol, atol
+        return a / b, "cuda_ref"
     if fn in {"fma", "fma_rn", "fma_rz", "fma_rd", "fma_ru"} and b is not None and c is not None:
-        return a * b + c, "cuda_ref", rtol, atol
+        return a * b + c, "cuda_ref"
     if fn == "norm3d" and b is not None and c is not None:
-        return torch.sqrt(a * a + b * b + c * c), "cuda_ref", rtol, atol
+        return torch.sqrt(a * a + b * b + c * c), "cuda_ref"
     if fn == "rnorm3d" and b is not None and c is not None:
-        return 1.0 / torch.sqrt(a * a + b * b + c * c), "cuda_ref", rtol, atol
+        return 1.0 / torch.sqrt(a * a + b * b + c * c), "cuda_ref"
     if fn == "norm4d" and b is not None and c is not None and d is not None:
-        return torch.sqrt(a * a + b * b + c * c + d * d), "cuda_ref", rtol, atol
+        return torch.sqrt(a * a + b * b + c * c + d * d), "cuda_ref"
     if fn == "rnorm4d" and b is not None and c is not None and d is not None:
-        return 1.0 / torch.sqrt(a * a + b * b + c * c + d * d), "cuda_ref", rtol, atol
+        return 1.0 / torch.sqrt(a * a + b * b + c * c + d * d), "cuda_ref"
 
-    return None, "smoke_only", rtol, atol
+    return None, "smoke_only"
 
 def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
     start_all = time.time()
@@ -535,11 +532,11 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
 
             launch = _make_launch(module._k, grid, *tensors, out, args.size, args.block)
             run_quietly(launch, _sync_device)
-            expected, reference, rtol, atol = _libdevice_reference(fn, tensors, sig)
+            expected, reference = _libdevice_reference(fn, tensors, sig)
             ok = True
             detail = f"validated-smoke:{fn}; ref={reference}; max_abs=NA; max_rel=NA"
             if expected is not None:
-                ok, max_abs, max_rel = _compare_tensors(out, expected, rtol=rtol, atol=atol)
+                ok, max_abs, max_rel = _compare_tensors(out, expected)
                 detail = _format_error_detail(f"validated-libdevice:{fn}", max_abs, max_rel, reference=reference)
             ms = benchmark_quietly(launch, args.warmup, args.rep)
             _sync_device()

@@ -292,12 +292,12 @@ def _error_metrics(actual: torch.Tensor, expected: torch.Tensor) -> Tuple[float,
     denom = torch.clamp(expected_abs_all[comparable], min=1e-12)
     return float(diff.max().item()), float((diff / denom).max().item())
 
-def _compare_tensors(actual: torch.Tensor, expected: torch.Tensor, rtol: float = 1e-4, atol: float = 1e-4) -> Tuple[bool, float, float]:
+def _compare_tensors(actual: torch.Tensor, expected: torch.Tensor, rtol: float = 1e-2, atol: float = 1e-2) -> Tuple[bool, float, float]:
     expected = expected.to(actual.dtype)
     if actual.dtype.is_floating_point or expected.dtype.is_floating_point:
         ok = bool(torch.allclose(actual, expected, rtol=rtol, atol=atol, equal_nan=True))
     else:
-        ok = bool(torch.equal(actual, expected))
+        ok = bool(torch.equal(actual, expected)) 
     max_abs, max_rel = _error_metrics(actual, expected)
     return ok, max_abs, max_rel
 

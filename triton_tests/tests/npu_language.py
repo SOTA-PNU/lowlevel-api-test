@@ -1003,10 +1003,6 @@ def _benchmark_compiled(compiled, inputs, warmup, rep, capture_reports):
     return device_us / (1_000.0 * rep), "rbln-total-device", None
 
 
-def _npu_tolerance(name):
-    return 2e-1 if name == "dot" else 2e-2
-
-
 def _run_worker(name, warmup, rep, energy_seconds):
     model, inputs, expected = _case(name)
     dtype = input_dtype_label(inputs[0].dtype)
@@ -1021,7 +1017,6 @@ def _run_worker(name, warmup, rep, energy_seconds):
     else:
         with capture_reports() as _discarded_reports:
             actual = compiled(*inputs)
-    tolerance = _npu_tolerance(name)
     if expected is None:
         ok = bool(torch.isfinite(actual).all())
         max_abs = max_rel = 0.0
@@ -1029,13 +1024,9 @@ def _run_worker(name, warmup, rep, energy_seconds):
         ok, max_abs, max_rel = _compare_tensors(
             torch.sort(actual.reshape(-1)).values,
             torch.sort(expected.reshape(-1)).values,
-            rtol=tolerance,
-            atol=tolerance,
         )
     else:
-        ok, max_abs, max_rel = _compare_tensors(
-            actual, expected, rtol=tolerance, atol=tolerance
-        )
+        ok, max_abs, max_rel = _compare_tensors(actual, expected)
     ms = timer_source = timer_warning = None
     if ok:
         ms, timer_source, timer_warning = _benchmark_compiled(
