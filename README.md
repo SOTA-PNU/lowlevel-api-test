@@ -71,13 +71,6 @@ CUDA extra 스위트는 `triton.language.extra.cuda`에서 탐색한 API 중
 비교할 PyTorch 참조값이 없으면 launch metadata 또는 범위/유한성
 round-trip 불변 조건으로 검증합니다.
 
-### 회귀 테스트
-
-독립적인 pytest 검사는 공통 tolerance 정책, 연산자별 override가 없음을
-확인하는 검사, NPU benchmark/결과 helper 및 기본 CPU/CUDA smoke 동작을
-다룹니다. 이 검사는 테스트 프레임워크 자체를 검증하며
-`triton_test.py` 연산자 보고서에는 포함되지 않습니다.
-
 ## 테스트 과정
 
 각 실행은 다음과 같은 상위 수준의 순서로 진행됩니다.
@@ -166,8 +159,6 @@ abs(actual - expected) <= 1e-2 + 1e-2 * abs(expected)
 - `equal_nan=True`이므로 서로 대응하는 NaN 값은 일치하는 것으로 처리합니다.
 - CUDA extra API는 공통 tensor tolerance 대신 문서화된 launch metadata
   또는 범위/유한성 불변 조건을 사용합니다.
-- 독립적인 기본 CPU/CUDA pytest tensor 비교도 `rtol=1e-2`와
-  `atol=1e-2`를 사용합니다.
 - 의미 있는 숫자 target이 없는 API는 sentinel 또는 불변 조건 검사를
   실행하고 `accuracy=N/A`로 기록합니다.
 
@@ -287,7 +278,7 @@ reports/report_all_operators.txt
 
 ### 공통 저장소 설정
 
-프로젝트 metadata에는 Python 3.8 이상이 명시되어 있습니다. 현재 RBLN
+프로젝트 스크립트는 Python 3.9 이상을 대상으로 합니다. 현재 RBLN
 compiler wheel과 Docker image는 Python 3.10을 사용합니다.
 
 ```bash
@@ -298,13 +289,10 @@ git submodule update --init --recursive
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install numpy pytest
+python -m pip install numpy
 ```
 
-아래 설명에 따라 백엔드별 PyTorch와 Triton 구현을 설치합니다. 일반
-`requirements.txt`에도 `torch`가 포함되어 있지만 CPU, CUDA 또는
-RBLN에 맞는 build를 선택해 주지는 않습니다. `pip install -r requirements.txt`를
-사용하기 전에 대상 백엔드에 맞는 PyTorch build를 설치해야 합니다. 표준
+아래 설명에 따라 백엔드별 PyTorch와 Triton 구현을 설치합니다. 표준
 업스트림 Triton 설치에는 CPU 또는 RBLN 백엔드가 포함되지 않습니다.
 
 ### CPU 설정

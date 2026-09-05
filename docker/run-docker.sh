@@ -52,15 +52,17 @@ check_image() {
 
 sync_test_sources() {
     echo ">>> Copying current Triton test sources to container..."
-    docker cp triton_test.py "$CONTAINER_NAME:/workspace/triton_test.py"
+    local source
+    for source in triton_test.py cpu_gpu.py npu.py results.py benchmark.py; do
+        docker cp "$source" "$CONTAINER_NAME:/workspace/$source"
+    done
     docker exec "$CONTAINER_NAME" rm -rf /workspace/triton_tests
-    docker cp triton_tests "$CONTAINER_NAME:/workspace/triton_tests"
 }
 
 sync_npu_examples() {
     echo ">>> Copying current NPU integration examples to container..."
-    docker exec "$CONTAINER_NAME" rm -rf /workspace/tests
-    docker cp tests "$CONTAINER_NAME:/workspace/tests"
+    docker exec "$CONTAINER_NAME" rm -rf /workspace/tests /workspace/rbln_triton
+    docker cp rbln_triton "$CONTAINER_NAME:/workspace/rbln_triton"
 }
 
 # Run tests

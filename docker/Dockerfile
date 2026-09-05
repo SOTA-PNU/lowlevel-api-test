@@ -104,7 +104,7 @@ RUN if [ "$BUILD_MODE" = "cuda" ]; then \
     fi
 
 # Install additional requirements
-RUN /opt/triton-venv/bin/pip install numpy pytest
+RUN /opt/triton-venv/bin/pip install numpy
 
 # NPU: install rebel.triton directly from the authenticated RBLN Python index.
 # The pip configuration is provided only during this build step and is never

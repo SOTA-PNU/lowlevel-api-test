@@ -4,10 +4,50 @@ import argparse
 import math
 import os
 import time
-import torch
-from triton_tests.common import TestResult
-from triton_tests.report import generate_report
-from triton_tests.tests import cpu as cpu_tests, cuda as cuda_tests, npu as npu_tests
+
+
+def _run_cpu_or_gpu(args):
+    """Configure upstream Triton before importing the JIT kernel suite."""
+    import benchmark
+
+    if args.device == "cpu":
+        os.environ.setdefault("TRITON_CPU_BACKEND", "1")
+    else:
+        os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
+
+    triton_module, tl_module = benchmark._load_upstream_triton(args.local_triton)
+    libdevice_module = None
+    extra_module = None
+    if args.device == "cuda":
+        try:
+            import triton.language.extra.libdevice as libdevice_module
+        except Exception:
+            pass
+        try:
+            from triton.language import extra as extra_module
+        except Exception:
+            pass
+
+    benchmark._configure_triton(
+        triton_module,
+        tl_module,
+        libdevice_module,
+        extra_module,
+    )
+    benchmark._set_runtime_device(args.device)
+
+    # The decorators in cpu_gpu bind to the configured Triton module at import.
+    import cpu_gpu
+
+    return cpu_gpu.run(args)
+
+
+def _run_npu(args):
+    # Keep the optional rebel dependency out of CPU/CUDA and --list execution.
+    import npu
+
+    return npu.run(args)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -69,16 +109,18 @@ Examples:
         return
 
     if args.device == "auto":
+        import torch
+
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     start = time.time()
-    if args.device == "cpu":
-        results, triton_module, api = cpu_tests.run(args)
-    elif args.device == "npu":
-        results, triton_module, api = npu_tests.run(args)
+    if args.device == "npu":
+        results, triton_module, api = _run_npu(args)
     else:
-        results, triton_module, api = cuda_tests.run(args)
+        results, triton_module, api = _run_cpu_or_gpu(args)
     elapsed = time.time() - start
+
+    from results import TestResult, generate_report
 
     print(f"\nTESTING COMPLETED in {elapsed:.2f}s")
     report = generate_report(results, args, triton_module, api)
@@ -87,7 +129,7 @@ Examples:
     if args.module == "all":
         os.makedirs("reports", exist_ok=True)
         report_name = "reports/report_all_operators.txt"
-        with open(report_name, "w") as f:
+        with open(report_name, "w", encoding="utf-8") as f:
             f.write(report)
         print(f"\nReport saved to: {report_name}")
     else:

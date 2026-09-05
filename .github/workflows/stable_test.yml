@@ -82,7 +82,7 @@ jobs:
           changed_files="$(git diff --name-only "$BEFORE" "$SHA" || true)"
           echo "$changed_files"
 
-          if echo "$changed_files" | grep -Eq '^(\.github/workflows/stable_test\.yml|docker/Dockerfile|triton($|/)|\.gitmodules|requirements(-npu)?\.txt|setup\.py)$'; then
+          if echo "$changed_files" | grep -Eq '^(\.github/workflows/stable_test\.yml|docker/Dockerfile|triton($|/)|\.gitmodules)$'; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_build=false" >> "$GITHUB_OUTPUT"
