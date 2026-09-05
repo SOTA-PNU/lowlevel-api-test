@@ -317,7 +317,7 @@ CPU Docker image를 생성하려면 다음 명령을 사용합니다.
 ```bash
 docker build \
   --build-arg BUILD_MODE=cpu \
-  -t triton-local-build:cpu-latest \
+  -t ghcr.io/sota-pnu/lowlevel-api-test:cpu-latest \
   -f docker/Dockerfile .
 
 DOCKER_IMAGE_TAG=cpu-latest ./docker/run-docker.sh test-cpu
@@ -346,13 +346,16 @@ PyTorch가 요구하는 Triton 버전을 유지하도록 별도의 Triton upgrad
 기존 `--local-triton` 옵션은 제거했으므로 실행 명령에서 빼주세요.
 테스트 실행 중 개별 커널의 JIT 컴파일은 계속 수행합니다.
 
-설정된 NVIDIA host에서 helper script는 탐색된 디바이스에 따라 CUDA 모드와
-GPU architecture를 선택합니다. 현재 build script는 image에 CUDA 12.8
-toolkit을 사용합니다.
+GPU image는 CUDA 12.8 toolkit과 cu128 PyTorch/Triton wheel을 설치합니다
+(`docker/Dockerfile:11`, `:12`).
 
 ```bash
-./docker/build-docker.sh
-./docker/run-docker.sh test-cuda
+docker build \
+  --build-arg BUILD_MODE=cuda \
+  -t ghcr.io/sota-pnu/lowlevel-api-test:gpu-latest \
+  -f docker/Dockerfile .
+
+DOCKER_IMAGE_TAG=gpu-latest ./docker/run-docker.sh test-cuda
 ```
 
 ### RBLN NPU 설정
@@ -401,7 +404,7 @@ BuildKit secret을 제공해야 합니다.
 docker buildx build --load \
   --secret id=rbln_pip_config,src=/path/to/rbln-pip.conf \
   --build-arg BUILD_MODE=npu \
-  -t triton-local-build:npu-latest \
+  -t ghcr.io/sota-pnu/lowlevel-api-test:npu-latest \
   -f docker/Dockerfile .
 
 DOCKER_IMAGE_TAG=npu-latest ./docker/run-docker.sh test-npu

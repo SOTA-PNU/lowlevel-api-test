@@ -896,19 +896,13 @@ def _run_language_suite(args):
     configured_dtype_label = input_dtype_label(configured_dtype)
     energy_seconds = float(getattr(args, "energy_seconds", 3.0))
     worker_timeout = 320 + energy_seconds
-    suite_started = time.monotonic()
     print(
         f"\n[NPU] rebel.triton.language full callable coverage: {len(ops)} ops; "
         f"warmup={args.warmup}, rep={args.rep}, "
         f"energy={energy_seconds:g}s, worker timeout={worker_timeout:g}s",
         flush=True,
     )
-    for index, name in enumerate(ops, 1):
-        print(
-            f"[NPU] [{index}/{len(ops)}] Starting tl.{name} "
-            f"(suite elapsed {time.monotonic() - suite_started:.1f}s)",
-            flush=True,
-        )
+    for name in ops:
         t0 = time.time()
         key = f"tl.{name}"
         if name in TL_META_COMPILE:
