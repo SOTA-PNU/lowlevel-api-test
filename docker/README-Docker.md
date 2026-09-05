@@ -93,16 +93,23 @@ docker-compose -f docker/docker-compose.yml up triton-jupyter
 2. `/opt/triton-venv` 가상환경 생성
 3. 빌드 모드별 PyTorch 설치
 4. CUDA 모드에서 CUDA toolkit 설치
-5. CPU 모드에서 `triton-cpu` 소스 빌드
-6. CUDA 모드에서 `./triton` 서브모듈 기반 upstream Triton 빌드
-7. NPU 모드에서 `rebel-compiler`/`rebel.triton` 설치
-8. 선택된 백엔드 import와 등록 상태 검증
+5. CPU 모드에서 별도로 clone한 `triton-cpu` 소스 빌드 (해당 저장소 내부 서브모듈 포함)
+6. CUDA 모드에서 pip로 Triton wheel 설치 (PyTorch의 버전 제약 유지)
+7. NPU 모드에서 `rebel-compiler`/`rebel.triton` pip 설치
+8. `pip check`와 선택된 백엔드 import/등록 상태 검증
+9. 패키지 설치 후 테스트 소스 복사: 테스트 코드 변경 시 설치 레이어 재사용
+
+프로젝트의 `.gitmodules`와 CUDA용 `triton` 서브모듈은 제거했습니다.
+CUDA는 소스 빌드 없이 wheel만 설치하며, CPU 소스 빌드는 유지합니다.
+실행 명령에서 `--local-triton`을 제거하고 가상환경에 설치된 Triton을 사용합니다.
+`.dockerignore`는 이전 `triton` checkout, `.git`, host 가상환경을 build context에서 제외합니다.
+패키지 설치 명령은 Dockerfile에서 관리하며, CI가 Dockerfile 변경을 감지해 이미지를 다시 빌드합니다.
 
 ## 주의사항
 
 1. Docker가 실행 중이어야 합니다.
 2. CUDA 테스트에는 NVIDIA Container Toolkit과 NVIDIA runtime이 필요합니다.
-3. 첫 빌드는 30-60분 정도 걸릴 수 있습니다.
+3. CPU의 첫 소스 빌드는 30-60분 정도 걸릴 수 있습니다. CUDA는 wheel과 CUDA toolkit을 다운로드·설치하는 시간이 필요합니다.
 4. Docker 이미지와 빌드 캐시를 위해 충분한 디스크 공간이 필요합니다.
 5. NPU 빌드는 인증된 RBLN Python index 설정을 BuildKit secret으로 전달해야 합니다.
 

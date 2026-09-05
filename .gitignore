@@ -1,5 +1,6 @@
 # Virtual environments
 venv/
+.venv/
 venv_new/
 triton_build_env/
 env/
@@ -34,8 +35,8 @@ wheels/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Docker
-.dockerignore
+# Legacy Triton submodule checkout (packages are installed in the venv)
+/triton/
 
 # Reports and logs
 reports/
@@ -55,6 +56,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
 # Runtime/compiler probe artifacts
 /.inference_time.txt
 /[0-9]*/kernel_compile.py

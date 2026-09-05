@@ -1,0 +1,14 @@
+.git
+triton
+.venv
+venv
+venv_new
+triton_build_env
+env
+.env
+**/__pycache__
+**/*.pyc
+reports
+*.log
+build
+dist

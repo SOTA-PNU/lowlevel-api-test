@@ -1,19 +1,10 @@
-"""CPU/CUDA Triton language, libdevice, and extra.cuda test suites.
-
-The decorated kernels in this module bind to the Triton implementation that is
-active when the module is imported. Call benchmark._configure_triton before
-importing this module and use one backend per Python process.
-"""
-
 import copy
 import inspect
 import math
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
-
 import torch
-
 import benchmark as benchmark_module
 from results import (
     TestResult,
@@ -105,7 +96,6 @@ def _run_upstream_only_tl_ops(args):
         return ok, _format_error_detail(
             label, max_abs, max_rel, reference="torch"
         )
-
 
     for name in symbols:
         t0 = time.time()
@@ -562,9 +552,6 @@ SUPPORTED_OPS = tuple(
     ]
 )
 
-# These callables exist only in newer upstream Triton in the environments this
-# suite targets.  They retain their upstream-only kernels; every callable that
-# is exported by both upstream Triton and rebel.triton uses KERNELS below.
 UPSTREAM_ONLY_META_OPS = {
     "async_task", "condition", "constexpr_type", "slice", "tensor_descriptor",
     "tensor_descriptor_type", "tuple", "tuple_type",
@@ -692,19 +679,14 @@ def upstream_meta_kernel(x_ptr, out_ptr, size,
         wrapped = tl.condition(x == x, disable_licm=True)
         out = tl.where(wrapped.condition, x, x)
     elif MODE == 9:
-        # Let the frontend construct and propagate constexpr_type instead of
-        # invoking its compiler-internal constructor from JIT user code.
         marker: tl.constexpr = 7
         out = x + marker
     elif MODE == 10:
-        # Slice syntax makes the frontend construct the internal slice object.
         out = x[:]
     elif MODE == 12:
         values = tl.tuple([x, x])
         out = values[0]
     elif MODE == 13:
-        # Tuple construction/unpacking exercises inferred tuple_type without
-        # calling its compiler-internal constructor directly.
         first, second = (x, x + 1)
         out = first + second - x - 1
     elif MODE == 14:
@@ -912,7 +894,6 @@ def shared_reduce(
         reduced = tl.min(x, axis=2, keep_dims=True)
     else:
         reduced = tl.sum(x, axis=2, keep_dims=True)
-    # RBLN cannot expose a reduced value directly; consume it in a full-rank op.
     if mode == 0:
         out = tl.exp(x - reduced)
     elif mode == 1:
@@ -1914,8 +1895,6 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS,
                 )
             elif name == "dot_scaled":
-                # dot_scaled consumes encoded FP8 operands and E8M0 scales.
-                # Zero is the all-zero E4M3 bit pattern; 127 encodes scale 1.
                 a = torch.zeros((16, 64), device=device, dtype=torch.uint8)
                 b = torch.zeros((64, 16), device=device, dtype=torch.uint8)
                 a_scale = torch.full(
@@ -2746,11 +2725,9 @@ def _check_cpu_capability() -> None:
     print("Triton CPU driver activated via set_active_to_cpu().")
     print("CPU Triton backend capability check passed.")
 
-
 def _check_cuda_capability() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available.")
-
 
 def run_cpu(args):
     benchmark_module._set_runtime_device("cpu")
@@ -2764,7 +2741,6 @@ def run_cpu(args):
     results = test_tl_only(args)
     api = {"tl": len(collect_tl_symbols()), "libdevice": 0, "extra": 0}
     return results, triton, api
-
 
 def run_cuda(args):
     benchmark_module._set_runtime_device("cuda")
@@ -2788,7 +2764,6 @@ def run_cuda(args):
     api = collect_api_availability()
     return results, triton, api
 
-
 def run(args):
     if args.device == "cpu":
         return run_cpu(args)
@@ -2797,4 +2772,3 @@ def run(args):
     raise ValueError(
         f"cpu_gpu only supports 'cpu' or 'cuda', got {args.device!r}"
     )
-

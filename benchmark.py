@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import importlib.util
 import json
 import math
@@ -12,9 +10,7 @@ import tempfile
 import threading
 import time
 from typing import Optional
-
 import torch
-
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 triton = None
@@ -22,29 +18,20 @@ tl = None
 libdevice = None
 extra = None
 
-
-def _load_upstream_triton(use_local: bool = False):
-    if use_local:
-        triton_python_path = os.path.join(REPO_ROOT, "triton", "python")
-        if not os.path.exists(triton_python_path):
-            raise RuntimeError(
-                f"Local Triton path not found: {triton_python_path}. "
-                "Run without --local-triton or initialize/build ./triton."
-            )
-        if triton_python_path not in sys.path:
-            sys.path.insert(0, triton_python_path)
-        print(f"Using local Triton from: {triton_python_path}")
-    else:
-        print("Using installed Triton")
-
+def _load_upstream_triton():
+    """Load the Triton implementation installed in the active environment."""
     try:
         import triton as triton_module
         import triton.language as tl_module
     except Exception as exc:
-        raise RuntimeError(f"Failed to import Triton: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to import installed Triton: {exc}. "
+            "Install Triton for CUDA or triton-cpu for CPU; "
+            "see README.md for backend setup."
+        ) from exc
 
+    print(f"Using installed Triton from: {triton_module.__file__}")
     return triton_module, tl_module
-
 
 def _configure_triton(
     triton_module,
@@ -56,25 +43,20 @@ def _configure_triton(
     triton, tl = triton_module, tl_module
     libdevice, extra = libdevice_module, extra_module
 
-
 RUNTIME_DEVICE = "cuda"
 RUNTIME_DEVICE_LABEL = None
-
 
 def _set_runtime_device(device: str, label: Optional[str] = None) -> None:
     global RUNTIME_DEVICE, RUNTIME_DEVICE_LABEL
     RUNTIME_DEVICE = device if device in {"cuda", "cpu", "npu"} else "cuda"
     RUNTIME_DEVICE_LABEL = label
 
-
 def _runtime_device() -> str:
     return RUNTIME_DEVICE
-
 
 def _sync_device() -> None:
     if RUNTIME_DEVICE == "cuda":
         torch.cuda.synchronize()
-
 
 class NativeOutputCapture:
     """Capture Python and native compiler output written to stdout/stderr."""
@@ -102,7 +84,6 @@ class NativeOutputCapture:
         self.stream.close()
         return False
 
-
 def _native_error_summary(exc: Exception, output: str) -> str:
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     for line in lines:
@@ -122,7 +103,6 @@ def _native_error_summary(exc: Exception, output: str) -> str:
         return message.splitlines()[0][:700]
     return f"{type(exc).__name__}: native Triton compilation failed"
 
-
 def run_quietly(fn, synchronize=None) -> str:
     """Run a kernel without leaking native compiler diagnostics to the console."""
     capture = NativeOutputCapture()
@@ -135,7 +115,6 @@ def run_quietly(fn, synchronize=None) -> str:
         raise RuntimeError(_native_error_summary(exc, capture.output)) from exc
     return capture.output
 
-
 def _device_string() -> str:
     if RUNTIME_DEVICE_LABEL is not None:
         return RUNTIME_DEVICE_LABEL
@@ -144,7 +123,6 @@ def _device_string() -> str:
     if RUNTIME_DEVICE == "cpu":
         return "CPU"
     return "NPU"
-
 
 def _load_temp_module(source, prefix: str, module_name: str):
     fd, path = tempfile.mkstemp(prefix=prefix, suffix=".py")
@@ -155,7 +133,6 @@ def _load_temp_module(source, prefix: str, module_name: str):
     spec.loader.exec_module(module)
     return module, path
 
-
 def _unlink_quietly(path: Optional[str]):
     if not path:
         return
@@ -163,7 +140,6 @@ def _unlink_quietly(path: Optional[str]):
         os.unlink(path)
     except OSError:
         pass
-
 
 def _do_bench(fn, warmup: int, rep: int) -> float:
     """Return average kernel time in ms."""
@@ -188,19 +164,16 @@ def _do_bench(fn, warmup: int, rep: int) -> float:
         _sync_device()
         return (time.perf_counter() - start_t) * 1000.0 / max(rep, 1)
 
-
 def benchmark_quietly(fn, warmup: int, rep: int) -> float:
     measured = []
     run_quietly(lambda: measured.append(_do_bench(fn, warmup, rep)))
     return measured[0]
-
 
 def _make_launch(kernel, grid_spec, *kernel_args, **meta):
     def launch():
         kernel[grid_spec](*kernel_args, **meta)
 
     return launch
-
 
 def _gbps(
     n: int,
@@ -211,7 +184,6 @@ def _gbps(
 ) -> float:
     byte_width = torch.empty((), dtype=dtype).element_size()
     return (n * byte_width * (inputs + outputs)) / (ms * 1e-3) / 1e9
-
 
 def _rbln_timer_us(reports, field):
     values = []
@@ -233,11 +205,9 @@ def _rbln_timer_us(reports, field):
         raise RuntimeError("RBLN runtime emitted no timer reports")
     return sum(values)
 
-
 _POWER_VALUE = re.compile(
     r"^\s*([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\s*(uW|mW|W)\s*$"
 )
-
 
 def _power_value_w(value):
     if not isinstance(value, str):
@@ -251,7 +221,6 @@ def _power_value_w(value):
     if not math.isfinite(watts) or watts < 0:
         raise ValueError(f"invalid card_power value: {value!r}")
     return watts
-
 
 def _rbln_smi_snapshot():
     process = subprocess.run(
@@ -295,15 +264,12 @@ def _rbln_smi_snapshot():
     ]
     return card_watts, npu_to_sid, contexts
 
-
 _POWER_SAMPLE_INTERVAL_S = 1.05
 _POWER_STABILITY_REL = 0.05
 _POWER_BASELINE_MAX_S = 8.0
 
-
 class _SharedCardError(RuntimeError):
     pass
-
 
 def _power_is_stable(values):
     if len(values) < 3:
@@ -314,7 +280,6 @@ def _power_is_stable(values):
         max(recent) - min(recent)
         <= _POWER_STABILITY_REL * max(abs(center), 1e-12)
     )
-
 
 def _worker_card_sids(npu_to_sid, contexts):
     worker_pid = str(os.getpid())
@@ -342,7 +307,6 @@ def _worker_card_sids(npu_to_sid, contexts):
     )
     return target_sids, shared_card
 
-
 def _target_power_snapshot(expected_sids=None):
     query_start = time.perf_counter()
     card_watts, npu_to_sid, contexts = _rbln_smi_snapshot()
@@ -365,7 +329,6 @@ def _target_power_snapshot(expected_sids=None):
         sum(float(card_watts[sid]) for sid in target_sids),
         target_sids,
     )
-
 
 def _collect_idle_power(target_sids):
     samples = []
@@ -393,7 +356,6 @@ def _collect_idle_power(target_sids):
         if timestamp >= deadline:
             raise RuntimeError("RBLN idle card power did not stabilize")
         next_sample_at = timestamp + _POWER_SAMPLE_INTERVAL_S
-
 
 def _measure_energy_mj_per_call(compiled, inputs, minimum_seconds):
     try:
@@ -492,13 +454,11 @@ def _measure_energy_mj_per_call(compiled, inputs, minimum_seconds):
     warning = ",".join(warnings) if warnings else None
     return energy_mj, "rbln-smi-steady-dynamic-card", warning
 
-
 def _host_wall_benchmark(compiled, inputs, rep):
     start_ns = time.perf_counter_ns()
     for _ in range(rep):
         compiled(*inputs)
     return (time.perf_counter_ns() - start_ns) / 1_000_000.0 / rep
-
 
 def _benchmark_compiled(compiled, inputs, warmup, rep, capture_reports):
     if capture_reports is None:

@@ -42,7 +42,7 @@ services:
     volumes:
       - ..:/workspace
     working_dir: /workspace
-    command: python triton_test.py --local-triton
+    command: python triton_test.py
     stdin_open: true
     tty: true
 
@@ -56,6 +56,6 @@ services:
     volumes:
       - ..:/workspace
     working_dir: /workspace
-    command: python triton_test.py --local-triton --detailed
+    command: python triton_test.py --device cuda
     stdin_open: true
     tty: true

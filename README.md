@@ -279,12 +279,12 @@ reports/report_all_operators.txt
 ### 공통 저장소 설정
 
 프로젝트 스크립트는 Python 3.9 이상을 대상으로 합니다. 현재 RBLN
-compiler wheel과 Docker image는 Python 3.10을 사용합니다.
+compiler wheel과 Docker image는 Python 3.10을 사용합니다. 아래 wheel 설치
+환경도 Python 3.10 이상을 사용하세요. 백엔드별로 별도 가상환경을 권장합니다.
 
 ```bash
 git clone https://github.com/SOTA-PNU/lowlevel-api-test.git
 cd lowlevel-api-test
-git submodule update --init --recursive
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -297,8 +297,15 @@ python -m pip install numpy
 
 ### CPU 설정
 
-활성 환경에 `triton-lang/triton-cpu`를 설치하거나 build한 다음, CPU
-드라이버를 선택할 수 있는지 확인합니다.
+CPU는 별도 `triton-lang/triton-cpu` 구현이 필요합니다. CUDA용
+`pip install triton`으로는 CPU 백엔드가 설치되지 않습니다.
+[triton-cpu 공식 설치 안내](https://github.com/triton-lang/triton-cpu#getting-started)에
+따라 활성 환경에 설치한 다음, CPU 드라이버를 선택할 수 있는지 확인합니다.
+
+이 프로젝트의 Triton 서브모듈은 제거했습니다. CPU Docker image는 기존처럼
+`triton-cpu` 저장소를 별도로 clone하고 그 저장소 내부의 서브모듈을 초기화한 뒤
+소스 빌드합니다. 테스트 코드만 바뀌면 Docker의 설치 레이어를 재사용합니다.
+CPU도 소스 빌드를 없애려면 호환되는 `triton-cpu` wheel을 별도로 준비해야 합니다.
 
 ```bash
 export TRITON_CPU_BACKEND=1
@@ -318,22 +325,26 @@ DOCKER_IMAGE_TAG=cpu-latest ./docker/run-docker.sh test-cpu
 
 ### NVIDIA GPU 설정
 
-NVIDIA 드라이버, 해당 드라이버와 호환되고 CUDA를 지원하는 PyTorch build,
-그리고 업스트림 Triton을 설치합니다. 테스트 전에 런타임을 확인합니다.
+NVIDIA 드라이버와 호환되는 CUDA PyTorch wheel을 먼저 설치한 뒤
+CUDA 의존성을 설치합니다. 아래는 CUDA 12.8 wheel을 사용하는 예시입니다.
+드라이버에 맞는 PyTorch index를 선택하세요.
 
 ```bash
+python -m pip install --only-binary=:all: torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install --only-binary=:all: torch triton numpy
+python -m pip check
+
 nvidia-smi
-python -c "import torch; assert torch.cuda.is_available()"
+python -c "import torch, triton; assert torch.cuda.is_available(); print(triton.__version__, triton.__file__)"
 python triton_test.py --device cuda
 ```
 
-설치된 package 대신 저장소의 Triton submodule을 사용하려면 다음 명령을
-실행합니다.
-
-```bash
-git submodule update --init --recursive
-python triton_test.py --local-triton --device cuda
-```
+[Triton 공식 wheel](https://triton-lang.org/main/getting-started/installation.html)을
+사용하므로 서브모듈 초기화나 Triton 자체의 소스 빌드는 필요하지 않습니다.
+PyTorch가 요구하는 Triton 버전을 유지하도록 별도의 Triton upgrade는 하지 않습니다.
+`--only-binary=:all:`은 호환 wheel이 없으면 소스 빌드 대신 설치 오류를 반환합니다.
+기존 `--local-triton` 옵션은 제거했으므로 실행 명령에서 빼주세요.
+테스트 실행 중 개별 커널의 JIT 컴파일은 계속 수행합니다.
 
 설정된 NVIDIA host에서 helper script는 탐색된 디바이스에 따라 CUDA 모드와
 GPU architecture를 선택합니다. 현재 build script는 image에 CUDA 12.8

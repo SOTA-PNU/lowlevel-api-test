@@ -1,21 +1,15 @@
-#!/usr/bin/env python3
-
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Dict, Optional, Tuple
-
 import torch
-
 from benchmark import _device_string, benchmark_quietly
-
 
 class TestResult(Enum):
     PASS = "PASS"
     FAIL = "FAIL"
     ERROR = "ERROR"
-
 
 @dataclass
 class TestResultInfo:
@@ -56,12 +50,10 @@ class TestResultInfo:
             else:
                 self.accuracy_status = "N/A"
 
-
 def _metric(value: Optional[float], digits: Optional[int] = None) -> str:
     if value is None:
         return "-"
     return repr(value) if digits is None else f"{value:.{digits}f}"
-
 
 def _print_perf_row(
     name: str,
@@ -75,7 +67,6 @@ def _print_perf_row(
         f"{_metric(r.ms):>10} {_metric(r.gbps, 2):>10}    {r.detail}"
     )
 
-
 def _result_counts(
     results: Dict[str, TestResultInfo],
 ) -> Dict[TestResult, int]:
@@ -83,7 +74,6 @@ def _result_counts(
         status: sum(1 for r in results.values() if r.result == status)
         for status in TestResult
     }
-
 
 def _module_breakdown(
     results: Dict[str, TestResultInfo],
@@ -102,7 +92,6 @@ def _module_breakdown(
         stats["total"] += 1
         stats[fields[r.result]] += 1
     return modules
-
 
 def _record(
     results: Dict[str, TestResultInfo],
@@ -139,10 +128,8 @@ def _record(
     else:
         print(f"⚠️   {name:42} {dtype:6} {detail}")
 
-
 def _validation_detail(ok: bool, detail: str = "validated") -> str:
     return detail if ok else f"validation failed: {detail}"
-
 
 def _error_metrics(
     actual: torch.Tensor,
@@ -192,7 +179,6 @@ def _compare_tensors(
     max_abs, max_rel = _error_metrics(actual, expected)
     return ok, max_abs, max_rel
 
-
 def _format_error_detail(
     detail: str,
     max_abs: float,
@@ -204,7 +190,6 @@ def _format_error_detail(
         f"max_rel={max_rel:.6g}"
     )
 
-
 def _report_detail(detail: str) -> str:
     parts = [p.strip() for p in detail.split(";") if p.strip()]
     if parts and (
@@ -214,7 +199,6 @@ def _report_detail(detail: str) -> str:
         parts = parts[1:]
     parts = [p for p in parts if p != "ref=cuda_ref"]
     return "; ".join(parts) if parts else detail
-
 
 def _record_validation(
     results,
@@ -245,7 +229,6 @@ def _record_validation(
         detail=_validation_detail(ok, detail),
         energy_mj_per_call=energy_mj_per_call if ok else None,
     )
-
 
 def generate_report(
     results: Dict[str, TestResultInfo],

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import argparse
 import json
 import math
@@ -31,9 +29,6 @@ from results import (
     _record_validation,
 )
 
-# cpu_gpu defines the canonical shared Triton kernels at import time. Configure
-# its runtime first so those kernels are decorated with rebel.triton, not the
-# upstream CPU/CUDA implementation.
 benchmark_module._configure_triton(rbln_triton, rbln_tl)
 
 from cpu_gpu import (
@@ -72,8 +67,6 @@ from cpu_gpu import (
     validate_meta_symbol,
 )
 
-# Preserve the helper surface used by regression tests while keeping the
-# implementation in benchmark.py.
 _SharedCardError = benchmark_module._SharedCardError
 _benchmark_compiled = benchmark_module._benchmark_compiled
 _measure_energy_mj_per_call = benchmark_module._measure_energy_mj_per_call
@@ -902,8 +895,20 @@ def _run_language_suite(args):
     configured_dtype = positive_input().dtype
     configured_dtype_label = input_dtype_label(configured_dtype)
     energy_seconds = float(getattr(args, "energy_seconds", 3.0))
-    print(f"\n[NPU] rebel.triton.language full callable coverage: {len(ops)} ops")
-    for name in ops:
+    worker_timeout = 320 + energy_seconds
+    suite_started = time.monotonic()
+    print(
+        f"\n[NPU] rebel.triton.language full callable coverage: {len(ops)} ops; "
+        f"warmup={args.warmup}, rep={args.rep}, "
+        f"energy={energy_seconds:g}s, worker timeout={worker_timeout:g}s",
+        flush=True,
+    )
+    for index, name in enumerate(ops, 1):
+        print(
+            f"[NPU] [{index}/{len(ops)}] Starting tl.{name} "
+            f"(suite elapsed {time.monotonic() - suite_started:.1f}s)",
+            flush=True,
+        )
         t0 = time.time()
         key = f"tl.{name}"
         if name in TL_META_COMPILE:
@@ -924,7 +929,6 @@ def _run_language_suite(args):
             )
             continue
         process_env = _worker_env(name)
-        worker_timeout = 320 + energy_seconds
         try:
             with tempfile.TemporaryDirectory(
                 prefix=f"rbln-triton-{name}-"
@@ -1028,7 +1032,7 @@ def _run_language_suite(args):
 
 
 def _capability_check() -> None:
-    print("\n[NPU] Checking Triton NPU backend capability...")
+    print("\n[NPU] Checking Triton NPU backend capability...", flush=True)
     try:
         from rebel.triton.backends import backends
     except Exception as exc:
@@ -1082,7 +1086,6 @@ def _device_inventory() -> dict:
             continue
     return {"devices": []}
 
-
 def _device_label(torch_module) -> str:
     devices = _device_inventory().get("devices", [])
     if devices:
@@ -1108,7 +1111,6 @@ def _device_label(torch_module) -> str:
             pass
     return "NPU"
 
-
 TRITON_EXAMPLES = [
     ("vector_add_rank3", "01_vector_add_rank3.py"),
     ("fused_softmax", "02_fused_softmax.py"),
@@ -1118,7 +1120,6 @@ TRITON_EXAMPLES = [
     ("math_function", "07_math_function.py"),
     ("block_scaled_matmul", "10_block_scaled_matmul.py"),
 ]
-
 
 def _run_integration_examples(repo_root: str) -> dict:
     """Run every RBLN Triton integration example in an isolated process."""
@@ -1151,7 +1152,11 @@ def _run_integration_examples(repo_root: str) -> dict:
 
     print(f"{'example':<22}{'status':<8}detail")
     results = {}
-    for name, filename in TRITON_EXAMPLES:
+    for index, (name, filename) in enumerate(TRITON_EXAMPLES, 1):
+        print(
+            f"[NPU] [example {index}/{len(TRITON_EXAMPLES)}] Starting {name}",
+            flush=True,
+        )
         t0 = time.time()
         path = os.path.join(examples_dir, filename)
         env = dict(os.environ)
@@ -1201,9 +1206,7 @@ def _run_integration_examples(repo_root: str) -> dict:
     print(f"\n[NPU] Triton-examples-on-NPU: {status}")
     return results
 
-
 def run(args):
-    """Run the requested RBLN NPU suites."""
     print(
         "Using rebel.triton (RBLN) "
         f"v{getattr(rbln_triton, '__version__', '?')}"
@@ -1234,7 +1237,6 @@ def run(args):
     }
     return results, rbln_triton, api
 
-
 if __name__ == "__main__" and os.environ.get("RBLN_WRITE_RTOSA") != "1":
     worker_parser = argparse.ArgumentParser()
     worker_parser.add_argument("--worker", required=True, metavar="OP")
@@ -1257,4 +1259,3 @@ if __name__ == "__main__" and os.environ.get("RBLN_WRITE_RTOSA") != "1":
         worker_args.rep,
         worker_args.energy_seconds,
     )
-

@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Triton Docker Run Script
-# Runs various Triton operations in Docker containers
-
 set -e
 
 DOCKER_IMAGE_REF="${DOCKER_IMAGE_LOCAL:-triton-local-build}:${DOCKER_IMAGE_TAG:-latest}"
@@ -16,7 +13,7 @@ show_usage() {
     echo "Usage: $0 [COMMAND]"
     echo ""
     echo "Commands:"
-    echo "  test        - Run Triton tests with local build"
+    echo "  test        - Run Triton tests with installed Triton"
     echo "  test-cpu    - Run tests on CPU only"
     echo "  test-cuda   - Run tests on CUDA"
     echo "  test-npu    - Run tests on Rebellions NPU"
@@ -68,7 +65,7 @@ sync_npu_examples() {
 # Run tests
 run_test() {
     local device=${1:-"auto"}
-    echo "🧪 Running Triton tests with local build (device: $device)..."
+    echo "Running Triton tests with installed Triton (device: $device)..."
 
     if [ "$device" = "auto" ]; then
         case "${DOCKER_IMAGE_TAG:-}" in
@@ -107,7 +104,7 @@ run_test() {
     echo ">>> Creating temporary container: $CONTAINER_NAME"
     
     if [ "$device" = "npu" ]; then
-        echo "🧠 Using NPU container runtime access..."
+        echo "Using NPU container runtime access..."
 
         # The host RBLN Container Toolkit supplies devices, runtime libraries,
         # and management tools through its CDI specification.
@@ -125,18 +122,17 @@ run_test() {
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
-            /opt/triton-venv/bin/python triton_test.py --device npu \
+            /opt/triton-venv/bin/python -u triton_test.py --device npu \
             $TEST_RESULT_POLICY_ARG
 
     elif [ "$device" = "cuda" ]; then
-        echo "🚀 Using NVIDIA runtime with CUDA..."
+        echo "Using NVIDIA runtime with CUDA..."
 
         # Start container in background
         docker run -d --name "$CONTAINER_NAME" \
             --runtime=nvidia \
             --gpus all \
             -w /workspace \
-            -e TRITON_BACKENDS_IN_TREE=1 \
             -e PYTHONPATH="" \
             "$DOCKER_IMAGE_REF" \
             sleep infinity 
@@ -146,11 +142,11 @@ run_test() {
         # Execute test
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cuda \
+            /opt/triton-venv/bin/python -u triton_test.py --device cuda \
             $TEST_RESULT_POLICY_ARG
 
     else
-        echo "🖥️  NVIDIA runtime not available, running without GPU support..."
+        echo "NVIDIA runtime not available, running without GPU support..."
 
         # Start container in background
         docker run -d --name "$CONTAINER_NAME" \
@@ -166,7 +162,7 @@ run_test() {
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env TRITON_CPU_BACKEND=1 \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu \
+            /opt/triton-venv/bin/python -u triton_test.py --device cpu \
             $TEST_RESULT_POLICY_ARG
     fi
 
@@ -175,56 +171,54 @@ run_test() {
 
 # Run CPU-only tests
 run_test_cpu() {
-    echo "🖥️  Running CPU-only tests..."
+    echo "Running CPU-only tests..."
     run_test "cpu"
 }
 
 # Run CUDA tests
 run_test_cuda() {
-    echo "🚀 Running CUDA tests..."
+    echo "Running CUDA tests..."
     run_test "cuda"
 }
 
 # Run NPU tests
 run_test_npu() {
-    echo "🧠 Running NPU tests..."
+    echo "Running NPU tests..."
     run_test "npu"
 }
 
 # Run detailed tests
 run_test_detailed() {
-    echo "🔍 Running detailed tests..."
+    echo "Running detailed tests..."
     
     
     # Check if NVIDIA runtime is available
     if docker info | grep -q "nvidia"; then
-        echo "🚀 Using NVIDIA runtime..."
+        echo "Using NVIDIA runtime..."
         docker run -it --rm \
             --runtime=nvidia \
             --gpus all \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
-            -e TRITON_BACKENDS_IN_TREE=1 \
             "$DOCKER_IMAGE_REF" \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --detailed
+            /opt/triton-venv/bin/python -u triton_test.py --device cuda
     else
-        echo "🖥️  NVIDIA runtime not available, running CPU-only tests..."
+        echo "NVIDIA runtime not available, running CPU-only tests..."
         docker run -it --rm \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
-            -e TRITON_BACKENDS_IN_TREE=1 \
             "$DOCKER_IMAGE_REF" \
-            /opt/triton-venv/bin/python triton_test.py --local-triton --device cpu
+            /opt/triton-venv/bin/python -u triton_test.py --device cpu
     fi
 }
 
 # Run development container
 run_dev() {
-    echo "🚀 Starting development container..."
+    echo "Starting development container..."
     
     # Check if NVIDIA runtime is available
     if docker info | grep -q "nvidia"; then
-        echo "🚀 Using NVIDIA runtime..."
+        echo "Using NVIDIA runtime..."
         docker run -it --rm \
             --runtime=nvidia \
             --gpus all \
@@ -233,7 +227,7 @@ run_dev() {
             "$DOCKER_IMAGE_REF" \
             bash
     else
-        echo "🖥️  NVIDIA runtime not available, starting without GPU support..."
+        echo "NVIDIA runtime not available, starting without GPU support..."
         docker run -it --rm \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
@@ -244,11 +238,11 @@ run_dev() {
 
 # Start Jupyter Lab
 run_jupyter() {
-    echo "📓 Starting Jupyter Lab..."
+    echo "Starting Jupyter Lab..."
     
     # Check if NVIDIA runtime is available
     if docker info | grep -q "nvidia"; then
-        echo "🚀 Using NVIDIA runtime..."
+        echo "Using NVIDIA runtime..."
         docker run -it --rm \
             --runtime=nvidia \
             --gpus all \
@@ -258,7 +252,7 @@ run_jupyter() {
             "$DOCKER_IMAGE_REF" \
             bash -c "/opt/triton-venv/bin/pip install jupyter && /opt/triton-venv/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root"
     else
-        echo "🖥️  NVIDIA runtime not available, starting without GPU support..."
+        echo "NVIDIA runtime not available, starting without GPU support..."
         docker run -it --rm \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
@@ -270,11 +264,11 @@ run_jupyter() {
 
 # Start interactive bash
 run_bash() {
-    echo "🐚 Starting interactive bash session..."
+    echo "Starting interactive bash session..."
     
     # Check if NVIDIA runtime is available
     if docker info | grep -q "nvidia"; then
-        echo "🚀 Using NVIDIA runtime..."
+        echo "Using NVIDIA runtime..."
         docker run -it --rm \
             --runtime=nvidia \
             --gpus all \
@@ -283,7 +277,7 @@ run_bash() {
             "$DOCKER_IMAGE_REF" \
             bash -c "source /opt/triton-venv/bin/activate && bash"
     else
-        echo "🖥️  NVIDIA runtime not available, starting without GPU support..."
+        echo "NVIDIA runtime not available, starting without GPU support..."
         docker run -it --rm \
             -v "$(pwd)":/workspace/low_api_test \
             -w /workspace \
@@ -303,7 +297,7 @@ clean_docker() {
 
 # Show logs
 show_logs() {
-    echo "📋 Showing container logs..."
+    echo "Showing container logs..."
     docker logs $(docker ps -q --filter "ancestor=$DOCKER_IMAGE_REF") 2>/dev/null || echo "No running containers found."
 }
 

@@ -66,7 +66,7 @@ jobs:
           fi
 
           env -u TRITON_BACKENDS_IN_TREE PYTHONPATH="" \
-            "$NPU_PYTHON" triton_test.py --device npu "${result_args[@]}"
+            "$NPU_PYTHON" -u triton_test.py --device npu "${result_args[@]}"
 
       - name: Upload NPU report
         if: ${{ always() && (steps.npu_tests.outcome == 'success' || steps.npu_tests.outcome == 'failure') }}

@@ -1,21 +1,15 @@
-#!/usr/bin/env python3
-
 import argparse
 import math
 import os
 import time
 
-
 def _run_cpu_or_gpu(args):
-    """Configure upstream Triton before importing the JIT kernel suite."""
     import benchmark
 
     if args.device == "cpu":
         os.environ.setdefault("TRITON_CPU_BACKEND", "1")
-    else:
-        os.environ.setdefault("TRITON_BACKENDS_IN_TREE", "1")
 
-    triton_module, tl_module = benchmark._load_upstream_triton(args.local_triton)
+    triton_module, tl_module = benchmark._load_upstream_triton()
     libdevice_module = None
     extra_module = None
     if args.device == "cuda":
@@ -36,18 +30,20 @@ def _run_cpu_or_gpu(args):
     )
     benchmark._set_runtime_device(args.device)
 
-    # The decorators in cpu_gpu bind to the configured Triton module at import.
     import cpu_gpu
 
     return cpu_gpu.run(args)
 
-
 def _run_npu(args):
-    # Keep the optional rebel dependency out of CPU/CUDA and --list execution.
+    print("[NPU] Loading RBLN Python modules...", flush=True)
+    started = time.monotonic()
     import npu
 
+    print(
+        f"[NPU] RBLN Python modules loaded in {time.monotonic() - started:.1f}s",
+        flush=True,
+    )
     return npu.run(args)
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -80,7 +76,6 @@ Examples:
             "Minimum sustained NPU power-sampling window; 0 disables mJ/call."
         ),
     )
-    parser.add_argument("--local-triton", action="store_true")
     parser.add_argument(
         "--soft-fail-results",
         action="store_true",
