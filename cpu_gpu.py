@@ -5,44 +5,22 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import torch
-import benchmark as benchmark_module
-from results import (
-    TestResult,
-    TestResultInfo,
-    _compare_tensors,
-    _format_error_detail,
-    _print_perf_row,
-    _record,
-    _record_validation,
-)
+import benchmark
+import results
 
-triton = benchmark_module.triton
-tl = benchmark_module.tl
-libdevice = benchmark_module.libdevice
-extra = benchmark_module.extra
+triton = benchmark.triton
+tl = benchmark.tl
+libdevice = benchmark.libdevice
+extra = benchmark.extra
 
 if triton is None or tl is None:
     raise RuntimeError(
-        "cpu_gpu runtime is not configured. "
-        "Call benchmark._configure_triton(...) before importing cpu_gpu."
+        "cpu/gpu runtime is not configured. "
+        "Call benchmark._set_triton_modules(...) before importing cpu_gpu."
     )
 
-_device_string = benchmark_module._device_string
-_gbps = benchmark_module._gbps
-_load_temp_module = benchmark_module._load_temp_module
-_make_launch = benchmark_module._make_launch
-_runtime_device = benchmark_module._runtime_device
-_sync_device = benchmark_module._sync_device
-_unlink_quietly = benchmark_module._unlink_quietly
-benchmark_quietly = benchmark_module.benchmark_quietly
-run_quietly = benchmark_module.run_quietly
-
-# Exported by the common libdevice namespace as a declaration-only placeholder;
-# the concrete extern implementation is HIP-only in upstream Triton 3.6.
-EXCLUDED_LIBDEVICE_FUNCS = {"fast_tanhf"}
-
 # ---------------------------------------------------------------------------
-# triton.language real functional/perf tests
+# triton.language tests
 # ---------------------------------------------------------------------------
 
 TL_TENSOR_DESC = {
@@ -65,37 +43,25 @@ def collect_tl_symbols():
             syms.append(name)
     return sorted(syms)
 
-def _run_upstream_only_tl_ops(args):
-    """Run callables that are absent from the rebel.triton API."""
-    results = {}
+def _run_unshared_tl(args):
+    records = {}
     n = args.size
     block = args.block
     grid = (triton.cdiv(n, block),)
-    device = _runtime_device()
+    device = benchmark._runtime_device()
     input_dtype = positive_input(device).dtype
-    dtype = input_dtype_label(input_dtype)
+    dtype = str(input_dtype).removeprefix("torch.")
     x_fp = torch.randn(n, device=device, dtype=input_dtype)
-    x_int = torch.randint(
-        1, 1000, (n,), device=device, dtype=torch.int32
-    )
-    y_int = torch.randint(
-        1, 1000, (n,), device=device, dtype=torch.int32
-    )
-    requested = {
-        part.strip() for part in args.only.split(",") if part.strip()
-    }
-    symbols = [
-        name for name in collect_tl_symbols()
-        if name in requested
-    ]
+    x_int = torch.randint(1, 1000, (n,), device=device, dtype=torch.int32)
+    y_int = torch.randint(1, 1000, (n,), device=device, dtype=torch.int32)
+    requested = {part.strip() for part in args.only.split(",") if part.strip()}
+    symbols = [name for name in collect_tl_symbols() if name in requested]
 
     print(f"\nDetected upstream-only tl symbols = {len(symbols)}")
 
     def valid(actual, expected, label):
-        ok, max_abs, max_rel = _compare_tensors(actual, expected)
-        return ok, _format_error_detail(
-            label, max_abs, max_rel, reference="torch"
-        )
+        ok, max_abs, max_rel = results._compare_tensors(actual, expected)
+        return ok, results._format_error_detail(label, max_abs, max_rel, reference="torch")
 
     for name in symbols:
         t0 = time.time()
@@ -107,171 +73,99 @@ def _run_upstream_only_tl_ops(args):
                 block_m = block_n = 16
 
                 def descriptor_allocator(size, alignment, stream):
-                    return torch.empty(
-                        size, device=device, dtype=torch.int8
-                    )
-
+                    return torch.empty(size, device=device, dtype=torch.int8)
                 triton.set_allocator(descriptor_allocator)
-                x_desc = torch.randn(
-                    (desc_rows, desc_cols), device=device,
-                    dtype=input_dtype,
-                )
+
+                x_desc = torch.randn((desc_rows, desc_cols), device=device, dtype=input_dtype)
                 out = torch.empty_like(x_desc)
-                desc_grid = (
-                    triton.cdiv(desc_rows, block_m),
-                    triton.cdiv(desc_cols, block_n),
-                )
-                launch = _make_launch(
-                    tensor_descriptor_identity_kernel,
-                    desc_grid,
-                    x_desc, out, desc_rows, desc_cols,
-                    BLOCK_M=block_m, BLOCK_N=block_n,
-                )
-                run_quietly(launch, _sync_device)
-                ok, detail = valid(
-                    out, x_desc, f"upstream-only:{name}"
-                )
+                desc_grid = (triton.cdiv(desc_rows, block_m), triton.cdiv(desc_cols, block_n))
+                launch = benchmark._make_launch(tensor_descriptor_identity_kernel, desc_grid, x_desc, out, 
+                                                desc_rows, desc_cols, BLOCK_M=block_m, BLOCK_N=block_n)
+                benchmark.run_quietly(launch, benchmark._sync_device)
+                ok, detail = valid(out, x_desc, f"upstream-only:{name}")
                 detail += "; descriptor_make_load_store=PASS"
             elif name == "reduce_or":
-                op_dtype = input_dtype_label(x_int.dtype)
+                op_dtype = str(x_int.dtype).removeprefix("torch.")
                 out = torch.empty(grid[0], device=device, dtype=torch.bool)
-                launch = _make_launch(
-                    reduce_or_kernel, grid, x_int, out, n, BLOCK=block
-                )
-                run_quietly(launch, _sync_device)
-                padded = torch.zeros(
-                    grid[0] * block, device=device, dtype=x_int.dtype
-                )
+                launch = benchmark._make_launch(reduce_or_kernel, grid, x_int, out, n, BLOCK=block)
+                benchmark.run_quietly(launch, benchmark._sync_device)
+                padded = torch.zeros(grid[0] * block, device=device, dtype=x_int.dtype)
                 padded[:n] = x_int
                 expected = (padded.reshape(grid[0], block) > 0).any(dim=1)
-                ok, detail = valid(
-                    out, expected, "upstream-only:reduce_or"
-                )
+                ok, detail = valid(out, expected, "upstream-only:reduce_or")
             elif name == "topk":
                 out = torch.empty_like(x_fp)
-                launch = _make_launch(
-                    topk_kernel, grid, x_fp, out, n, BLOCK=block
-                )
-                run_quietly(launch, _sync_device)
-                padded = torch.full(
-                    (grid[0] * block,), -float("inf"), device=device,
-                    dtype=input_dtype,
-                )
+                launch = benchmark._make_launch(topk_kernel, grid, x_fp, out, n, BLOCK=block)
+                benchmark.run_quietly(launch, benchmark._sync_device)
+                padded = torch.full((grid[0] * block,), -float("inf"), device=device, dtype=input_dtype)
                 padded[:n] = x_fp
-                expected = torch.sort(
-                    padded.reshape(grid[0], block),
-                    dim=1, descending=True,
-                ).values.reshape(-1)[:n]
-                ok, detail = valid(
-                    out, expected, "upstream-only:topk",
-                )
+                expected = torch.sort(padded.reshape(grid[0], block), 
+                                      dim=1, descending=True,).values.reshape(-1)[:n]
+                ok, detail = valid(out, expected, "upstream-only:topk")
             elif name == "bitonic_merge":
                 half = block // 2
                 pattern = torch.cat((
                     torch.arange(half, device=device),
-                    torch.arange(
-                        block - 1, half - 1, -1, device=device
-                    ),
+                    torch.arange(block - 1, half - 1, -1, device=device)
                 )).to(input_dtype)
                 values = pattern.repeat(grid[0])[:n]
                 out = torch.empty_like(values)
-                launch = _make_launch(
-                    bitonic_merge_kernel, grid, values, out, n,
-                    BLOCK=block,
-                )
-                run_quietly(launch, _sync_device)
-                padded = torch.full(
-                    (grid[0] * block,), float("inf"), device=device,
-                    dtype=input_dtype,
-                )
+                launch = benchmark._make_launch(bitonic_merge_kernel, grid, values, out, n, BLOCK=block)
+                benchmark.run_quietly(launch, benchmark._sync_device)
+                padded = torch.full((grid[0] * block,), float("inf"), device=device, dtype=input_dtype)
                 padded[:n] = values
-                expected = torch.sort(
-                    padded.reshape(grid[0], block), dim=1
-                ).values.reshape(-1)[:n]
-                ok, detail = valid(
-                    out, expected, "upstream-only:bitonic_merge"
-                )
+                expected = torch.sort(padded.reshape(grid[0], block), dim=1).values.reshape(-1)[:n]
+                ok, detail = valid(out, expected, "upstream-only:bitonic_merge")
             elif name == "map_elementwise":
-                op_dtype = input_dtype_label(x_int.dtype)
+                op_dtype = str(x_int.dtype).removeprefix("torch.")
                 out = torch.empty_like(x_int)
-                launch = _make_launch(
-                    map_elementwise_kernel, grid, x_int, y_int, out, n,
-                    BLOCK=block,
-                )
-                run_quietly(launch, _sync_device)
-                expected = torch.where(
-                    x_int < y_int, -torch.ones_like(x_int),
-                    torch.where(
-                        x_int == y_int, torch.zeros_like(x_int),
-                        torch.ones_like(x_int),
-                    ),
-                )
-                ok, detail = valid(
-                    out, expected, "upstream-only:map_elementwise"
-                )
+                launch = benchmark._make_launch(map_elementwise_kernel, grid, 
+                                                x_int, y_int, out, n, BLOCK=block)
+                benchmark.run_quietly(launch, benchmark._sync_device)
+                expected = torch.where(x_int < y_int, -torch.ones_like(x_int),
+                                       torch.where(x_int == y_int, torch.zeros_like(x_int), torch.ones_like(x_int)))
+                ok, detail = valid(out, expected, "upstream-only:map_elementwise")
             elif name in UPSTREAM_ONLY_TENSOR_OPS:
                 out = torch.empty_like(x_fp)
-                launch = _make_launch(
-                    upstream_tensor_ops_kernel, grid, x_fp, out, n,
-                    BLOCK=block, MODE=UPSTREAM_ONLY_TENSOR_OPS[name],
-                )
-                run_quietly(launch, _sync_device)
+                launch = benchmark._make_launch(upstream_tensor_ops_kernel, grid, x_fp, out, 
+                                                n, BLOCK=block, MODE=UPSTREAM_ONLY_TENSOR_OPS[name])
+                benchmark.run_quietly(launch, benchmark._sync_device)
                 if name == "to_tensor":
                     expected = x_fp + 7
                 elif name == "expect_zero":
-                    zero_mask = (
-                        torch.arange(n, device=device) % 2 == 0
-                    )
-                    expected = torch.where(
-                        zero_mask, torch.zeros_like(x_fp), x_fp
-                    )
+                    zero_mask = (torch.arange(n, device=device) % 2 == 0)
+                    expected = torch.where(zero_mask, torch.zeros_like(x_fp), x_fp)
                 else:
                     expected = x_fp
-                ok, detail = valid(
-                    out, expected, f"upstream-only:{name}"
-                )
+                ok, detail = valid(out, expected, f"upstream-only:{name}")
             elif name == "aggregate_replace":
                 validate_meta_symbol(name, tl, input_dtype)
                 out = torch.empty_like(x_fp)
-                launch = _make_launch(
-                    upstream_tensor_ops_kernel, grid, x_fp, out, n,
-                    BLOCK=block, MODE=AGGREGATE_REPLACE_SENTINEL_MODE,
-                )
-                run_quietly(launch, _sync_device)
-                ok, detail = valid(
-                    out, x_fp, f"upstream-only:{name}"
-                )
+                launch = benchmark._make_launch(upstream_tensor_ops_kernel, grid, x_fp, out, n,
+                                                BLOCK=block, MODE=AGGREGATE_REPLACE_SENTINEL_MODE)
+                benchmark.run_quietly(launch, benchmark._sync_device)
+                ok, detail = valid(out, x_fp, f"upstream-only:{name}")
                 detail += "; target_result=N/A; sentinel_exec=PASS"
             elif name in UPSTREAM_ONLY_META_OPS:
                 validate_meta_symbol(name, tl, input_dtype)
                 out = torch.empty_like(x_fp)
-                launch = _make_launch(
-                    upstream_meta_kernel, grid, x_fp, out, n,
-                    BLOCK=block, MODE=TL_META_COMPILE[name],
-                )
-                run_quietly(launch, _sync_device)
+                launch = benchmark._make_launch(upstream_meta_kernel, grid, x_fp, out, 
+                                                n, BLOCK=block, MODE=TL_META_COMPILE[name])
+                benchmark.run_quietly(launch, benchmark._sync_device)
                 expected = x_fp + 7 if name == "constexpr_type" else x_fp
-                ok, detail = valid(
-                    out, expected, f"upstream-only:{name}"
-                )
+                ok, detail = valid(out, expected, f"upstream-only:{name}")
                 detail += "; target_result=N/A; sentinel_exec=PASS"
             else:
-                _record(
-                    results, key, "tl", "-", "kernel", TestResult.ERROR, t0,
-                    detail="no upstream-only compile/execute adapter is defined",
-                )
+                results._record(records, key, "tl", "-", "kernel", results.TestResult.ERROR, t0, 
+                                detail="no upstream-only compile/execute adapter is defined")
                 continue
 
-            _record_validation(
-                results, key, "tl", op_dtype, "kernel", t0, ok, detail,
-                launch, args.warmup, args.rep,
-            )
+            results._record_validation(records, key, "tl", op_dtype, "kernel", t0, 
+                                       ok, detail, launch, args.warmup, args.rep)
         except Exception as exc:
-            _record(
-                results, key, "tl", op_dtype, "kernel", TestResult.ERROR, t0,
-                detail=f"{type(exc).__name__}: {exc}"[:1000],
-            )
-    return results
+            results._record(records, key, "tl", op_dtype, "kernel", results.TestResult.ERROR, t0,
+                             detail=f"{type(exc).__name__}: {exc}"[:1000])
+    return records
 
 # ---------------------------------------------------------------------------
 # Shared test dimensions and operation dispatch modes
@@ -307,11 +201,6 @@ BINARY_MODES = {
     "mul": 5,
     "div_rn": 6,
 }
-
-TL_META_RUNTIME = {
-    "PropagateNan", "block_type", "range", "device_print", "gather",
-    "histogram",
-}
 TL_META_COMPILE = {
     "const": 0,
     "constexpr": 1,
@@ -331,7 +220,6 @@ TL_META_COMPILE = {
     "tensor_descriptor": 15,
     "async_task": 16,
 }
-
 _META_SIGNATURES = {
     "device_print": {"prefix", "args", "hex"},
     "dot_scaled": {"lhs", "lhs_scale", "lhs_format", "rhs", "rhs_scale", "rhs_format"},
@@ -341,58 +229,35 @@ _META_SIGNATURES = {
     "map_elementwise": {"args"},
 }
 
-_TORCH_DTYPE_SPECS = {
-    torch.float16: ("fp16", "float16"),
-    torch.bfloat16: ("bf16", "bfloat16"),
-    torch.float32: ("fp32", "float32"),
-    torch.float64: ("fp64", "float64"),
-    torch.int8: ("int8", "int8"),
-    torch.int16: ("int16", "int16"),
-    torch.int32: ("int32", "int32"),
-    torch.int64: ("int64", "int64"),
-    torch.uint8: ("uint8", "uint8"),
-    torch.bool: ("bool", "int1"),
-}
-
-def input_dtype_label(dtype: torch.dtype) -> str:
-    spec = _TORCH_DTYPE_SPECS.get(dtype)
-    return spec[0] if spec else str(dtype).removeprefix("torch.")
-
 def _language_dtype(language, torch_dtype: torch.dtype):
-    spec = _TORCH_DTYPE_SPECS.get(torch_dtype)
-    if spec is None:
-        raise TypeError(f"unsupported configured input dtype: {torch_dtype}")
-    dtype_name, attribute = spec
+    attribute = str(torch_dtype).removeprefix("torch.")
     value = getattr(language, attribute, None)
     if value is None:
-        raise TypeError(
-            f"triton.language.{attribute} is unavailable for {dtype_name}"
-        )
-    return dtype_name, value
+        raise TypeError(f"triton.language.{attribute} is unavailable for {torch_dtype}")
+    return str(value), value
 
-def validate_meta_symbol(name, tl_module=None, torch_dtype=torch.float32):
-    """Validate a non-runtime tl export without pretending it executed on-device."""
+def validate_meta_symbol(op, tl_module=None, torch_dtype=torch.float32):
     language = tl_module or tl
-    if language is None or not hasattr(language, name):
-        raise AttributeError(f"triton.language.{name} is not exported")
-    obj = getattr(language, name)
+    if language is None or not hasattr(language, op):
+        raise AttributeError(f"triton.language.{op} is not exported")
+    obj = getattr(language, op)
     if not callable(obj):
-        raise TypeError(f"triton.language.{name} is not callable")
+        raise TypeError(f"triton.language.{op} is not callable")
 
     dtype_name, configured_type = _language_dtype(language, torch_dtype)
-    if name == "PropagateNan":
+    if op == "PropagateNan":
         members = getattr(obj, "__members__", None)
         if not members:
             raise TypeError("PropagateNan has no enum members")
         return "validated enum contract: " + ", ".join(sorted(members))
-    if name == "dtype":
+    if op == "dtype":
         value = obj(dtype_name)
         if value != configured_type:
             raise TypeError(
                 f"dtype('{dtype_name}') does not match configured dtype"
             )
         return f"validated dtype('{dtype_name}')"
-    if name == "str_to_ty":
+    if op == "str_to_ty":
         parameters = inspect.signature(obj).parameters
         value = (
             obj(dtype_name, None) if "c" in parameters else obj(dtype_name)
@@ -402,46 +267,45 @@ def validate_meta_symbol(name, tl_module=None, torch_dtype=torch.float32):
                 f"str_to_ty('{dtype_name}') does not match configured dtype"
             )
         return f"validated str_to_ty('{dtype_name}')"
-    if name == "constexpr":
+    if op == "constexpr":
         value = obj(64)
         if getattr(value, "value", None) != 64:
             raise TypeError("constexpr did not preserve its compile-time value")
         return "validated constexpr value preservation"
-    if name == "constexpr_type":
+    if op == "constexpr_type":
         value = obj(64)
         if getattr(value, "value", None) != 64:
             raise TypeError("constexpr_type did not preserve its value")
         return "validated constexpr_type(64) construction"
-    if name == "const":
+    if op == "const":
         obj()
         return "validated const annotation construction"
-    if name == "block_type":
+    if op == "block_type":
         obj(configured_type, [16])
         return f"validated block_type({dtype_name}, [16]) construction"
-    if name == "pointer_type":
+    if op == "pointer_type":
         obj(configured_type, address_space=1)
         return f"validated pointer_type({dtype_name}) construction"
-    if name == "function_type":
+    if op == "function_type":
         obj([configured_type], [configured_type])
         return "validated function_type construction"
-    if name == "slice":
+    if op == "slice":
         value = obj(0, 16, 1)
         if (value.start, value.stop, value.step) != (0, 16, 1):
             raise TypeError("slice did not preserve its bounds")
         return "validated slice(0, 16, 1) construction"
-    if name == "tuple_type":
+    if op == "tuple_type":
         value = obj([configured_type, configured_type])
         if len(value.types) != 2:
             raise TypeError("tuple_type did not preserve its element types")
         return "validated tuple_type construction"
-    if name == "nv_tma_desc_type":
+    if op == "nv_tma_desc_type":
         obj(const=True, address_space=0)
         return "validated NVIDIA TMA descriptor type construction"
-    if name == "range":
+    if op == "range":
         obj(0, 4)
         return "validated range iterator construction"
-
-    if name == "aggregate_replace":
+    if op == "aggregate_replace":
         class _HostAggregate:
             __triton_aggregate__ = True
             __aggregate_fields__ = ("first", "second")
@@ -452,30 +316,24 @@ def validate_meta_symbol(name, tl_module=None, torch_dtype=torch.float32):
 
         replaced = obj(_HostAggregate(1, 2), second=5)
         if (replaced.first, replaced.second) != (1, 5):
-            raise TypeError(
-                "aggregate_replace did not replace the requested field"
-            )
+            raise TypeError("aggregate_replace did not replace the requested field")
         try:
             obj(7, first=1)
         except TypeError:
             pass
         else:
-            raise TypeError(
-                "aggregate_replace accepted a non-aggregate instance"
-            )
+            raise TypeError("aggregate_replace accepted a non-aggregate instance")
         return "validated aggregate field replacement contract"
 
-    expected = _META_SIGNATURES.get(name)
+    expected = _META_SIGNATURES.get(op)
     if expected:
         target = getattr(obj, "fn", obj)
         parameters = set(inspect.signature(target).parameters)
-        if name == "map_elementwise" and not ({"fn", "scalar_fn"} & parameters):
+        if op == "map_elementwise" and not ({"fn", "scalar_fn"} & parameters):
             raise TypeError("unexpected signature; missing scalar callback parameter")
         missing = expected - parameters
         if missing:
-            raise TypeError(
-                f"unexpected signature; missing parameters: {', '.join(sorted(missing))}"
-            )
+            raise TypeError(f"unexpected signature; missing parameters: {', '.join(sorted(missing))}")
         return "validated callable signature: " + ", ".join(sorted(expected))
 
     return f"validated exported callable contract ({type(obj).__name__})"
@@ -590,7 +448,7 @@ class SharedKernels:
     tensor_compile: object
 
 # ---------------------------------------------------------------------------
-# Canonical Triton JIT kernels
+# Triton JIT kernels
 # ---------------------------------------------------------------------------
 
 @triton.jit
@@ -606,8 +464,7 @@ def _meta_identity_helper(x):
     return x
 
 @triton.jit
-def reduce_or_kernel(x_ptr, out_ptr, size,
-                     BLOCK: tl.constexpr):
+def reduce_or_kernel(x_ptr, out_ptr, size, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < size
     values = tl.load(x_ptr + offs, mask=mask, other=0)
@@ -624,8 +481,7 @@ def topk_kernel(x_ptr, out_ptr, size, BLOCK: tl.constexpr):
     tl.store(out_ptr + offs, tl.topk(values, k=BLOCK), mask=mask)
 
 @triton.jit
-def bitonic_merge_kernel(x_ptr, out_ptr, size,
-                         BLOCK: tl.constexpr):
+def bitonic_merge_kernel(x_ptr, out_ptr, size, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < size
     values = tl.load(
@@ -635,8 +491,7 @@ def bitonic_merge_kernel(x_ptr, out_ptr, size,
     tl.store(out_ptr + offs, merged, mask=mask)
 
 @triton.jit
-def map_elementwise_kernel(x_ptr, y_ptr, out_ptr, size,
-                           BLOCK: tl.constexpr):
+def map_elementwise_kernel(x_ptr, y_ptr, out_ptr, size, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < size
     x = tl.load(x_ptr + offs, mask=mask, other=0)
@@ -645,10 +500,7 @@ def map_elementwise_kernel(x_ptr, y_ptr, out_ptr, size,
     tl.store(out_ptr + offs, mapped, mask=mask)
 
 @triton.jit
-def tensor_descriptor_identity_kernel(
-    x_ptr, out_ptr, rows, cols,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-):
+def tensor_descriptor_identity_kernel(x_ptr, out_ptr, rows, cols, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,):
     x_desc = tl.make_tensor_descriptor(
         x_ptr,
         shape=[rows, cols],
@@ -669,9 +521,7 @@ def tensor_descriptor_identity_kernel(
     tl.store_tensor_descriptor(out_desc, offsets, block)
 
 @triton.jit
-def upstream_meta_kernel(x_ptr, out_ptr, size,
-                         BLOCK: tl.constexpr,
-                         MODE: tl.constexpr):
+def upstream_meta_kernel(x_ptr, out_ptr, size, BLOCK: tl.constexpr, MODE: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < size
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
@@ -722,9 +572,7 @@ UPSTREAM_ONLY_TENSOR_OPS = {
 AGGREGATE_REPLACE_SENTINEL_MODE = 4
 
 @triton.jit
-def upstream_tensor_ops_kernel(x_ptr, out_ptr, size,
-                               BLOCK: tl.constexpr,
-                               MODE: tl.constexpr):
+def upstream_tensor_ops_kernel(x_ptr, out_ptr, size, BLOCK: tl.constexpr, MODE: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < size
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
@@ -798,15 +646,8 @@ def shared_unary(
     tl.store(out_block, out)
 
 @triton.jit
-def shared_binary(
-    x_ptr,
-    y_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-    mode: tl.constexpr,
-):
+def shared_binary(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
+                  cols: tl.constexpr, mode: tl.constexpr):
     x_block = tl.make_block_ptr(
         base=x_ptr, shape=(batch, rows, cols),
         strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
@@ -841,14 +682,7 @@ def shared_binary(
     tl.store(out_block, out)
 
 @triton.jit
-def shared_where(
-    x_ptr,
-    y_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-):
+def shared_where(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, cols: tl.constexpr):
     x_block = tl.make_block_ptr(
         base=x_ptr, shape=(batch, rows, cols),
         strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
@@ -869,14 +703,8 @@ def shared_where(
     tl.store(out_block, tl.where(x > y, x, y))
 
 @triton.jit
-def shared_reduce(
-    x_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-    mode: tl.constexpr,
-):
+def shared_reduce(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
+                  cols: tl.constexpr, mode: tl.constexpr):
     x_block = tl.make_block_ptr(
         base=x_ptr, shape=(batch, rows, cols),
         strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
@@ -904,13 +732,7 @@ def shared_reduce(
     tl.store(out_block, out)
 
 @triton.jit
-def shared_zeros(
-    x_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-):
+def shared_zeros(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, cols: tl.constexpr):
     x_block = tl.make_block_ptr(
         base=x_ptr, shape=(batch, rows, cols),
         strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
@@ -923,18 +745,11 @@ def shared_zeros(
     )
     x = tl.load(x_block)
     zeros = tl.zeros((batch, rows, cols), x.dtype)
-    # Use zeros as a numeric operand while retaining a non-constant output graph.
     tl.store(out_block, tl.exp(tl.maximum(x, zeros)))
 
 @triton.jit
-def shared_shape(
-    x_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-    mode: tl.constexpr,
-):
+def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
+                 cols: tl.constexpr, mode: tl.constexpr):
     if mode == 0 or mode == 1:
         x_block = tl.make_block_ptr(
             base=x_ptr, shape=(batch, rows, cols),
@@ -999,13 +814,7 @@ def shared_shape(
         tl.store(out_block, out)
 
 @triton.jit
-def shared_dot(
-    a_ptr,
-    b_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    size: tl.constexpr,
-):
+def shared_dot(a_ptr, b_ptr, out_ptr, batch: tl.constexpr, size: tl.constexpr):
     a_block = tl.make_block_ptr(
         base=a_ptr, shape=(batch, size, size),
         strides=(size * size, size, 1), offsets=(0, 0, 0),
@@ -1024,14 +833,8 @@ def shared_dot(
     tl.store(out_block, tl.dot(tl.load(a_block), tl.load(b_block)))
 
 @triton.jit
-def shared_memory(
-    x_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-    mode: tl.constexpr,
-):
+def shared_memory(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
+                  cols: tl.constexpr, mode: tl.constexpr):
     if mode == 3:
         half: tl.constexpr = cols // 2
         x_block = tl.make_block_ptr(
@@ -1062,14 +865,8 @@ def shared_memory(
         tl.store(out_block, tl.exp(tl.load(x_block)))
 
 @triton.jit
-def shared_control(
-    x_ptr,
-    out_ptr,
-    batch: tl.constexpr,
-    rows: tl.constexpr,
-    cols: tl.constexpr,
-    mode: tl.constexpr,
-):
+def shared_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
+                   cols: tl.constexpr, mode: tl.constexpr):
     x_block = tl.make_block_ptr(
         base=x_ptr, shape=(batch, rows, cols),
         strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
@@ -1467,7 +1264,6 @@ def shared_dot_scaled(a_ptr, b_ptr, a_scale_ptr, b_scale_ptr, out_ptr,
     b = tl.load(b_ptr + b_offs)
     a_scale = tl.load(a_scale_ptr + a_scale_offs)
     b_scale = tl.load(b_scale_ptr + b_scale_offs)
-    # rebel.triton 3.2 requires K >= 64 and exactly one scaled operand.
     out = tl.dot_scaled(a, None, "e4m3", b, b_scale, "e4m3")
     out_offs = tl.arange(0, m)[:, None] * n + tl.arange(0, n)[None, :]
     tl.store(out_ptr + out_offs, out)
@@ -1517,11 +1313,28 @@ def selected_ops(only: str) -> Tuple[str, ...]:
         raise ValueError(f"Unsupported RBLN Triton op selection: {', '.join(unknown)}")
     return tuple(name for name in supported if name in requested)
 
+INPUT_DTYPE = torch.float32
+
 def positive_input(device: str = "cpu") -> torch.Tensor:
     return (
-        torch.rand((RBLN_BATCH, ROWS, COLS), device=device, dtype=torch.float32)
+        torch.rand((RBLN_BATCH, ROWS, COLS), device=device, dtype=INPUT_DTYPE)
         + 0.25
     )
+
+POSITIVE_ONLY_UNARY = {"log", "log2", "rsqrt", "sqrt", "sqrt_rn"}
+
+def signed_input(device: str = "cpu") -> torch.Tensor:
+    return (torch.rand((RBLN_BATCH, ROWS, COLS), device=device, dtype=INPUT_DTYPE) * 8.0 - 4.0)
+
+def signed_nonzero_input(device: str = "cpu") -> torch.Tensor:
+    x = signed_input(device)
+    return torch.where(x < 0, x.clamp(max=-0.25), x.clamp(min=0.25))
+
+ROUNDING_UNARY = {"ceil", "floor"}
+
+def stepped_input(device: str = "cpu") -> torch.Tensor:
+    steps = torch.arange(RBLN_BATCH * ROWS * COLS, device=device, dtype=INPUT_DTYPE) % 8
+    return (steps - 4.0 + 0.25).reshape(RBLN_BATCH, ROWS, COLS)
 
 def swizzle2d_reference(device: str = "cpu") -> torch.Tensor:
     offsets = torch.arange(ROWS * COLS, device=device)
@@ -1530,9 +1343,7 @@ def swizzle2d_reference(device: str = "cpu") -> torch.Tensor:
     ij = i * COLS + j
     group_id = ij // (group * COLS)
     off_i = group_id * group
-    group_rows = torch.minimum(
-        torch.full_like(i, group), torch.full_like(i, ROWS) - off_i
-    )
+    group_rows = torch.minimum(torch.full_like(i, group), torch.full_like(i, ROWS) - off_i)
     local_ij = ij % (group * COLS)
     return (
         (off_i + local_ij % group_rows) * COLS + local_ij // group_rows
@@ -1557,18 +1368,16 @@ def unary_reference(name: str, x: torch.Tensor) -> torch.Tensor:
     }
     return functions[name](x)
 
-def run_common_shared_suite(args, triton_module, tl_module):
+def run_shared_tl(args, triton_module, tl_module):
     """Run the canonical JIT kernels directly on the active CPU/CUDA backend."""
     kernels = create_kernels(triton_module, tl_module)
-    results = {}
-    device = _runtime_device()
+    records = {}
+    device = benchmark._runtime_device()
     ops = selected_ops(args.only)
-    configured_dtype = positive_input(device).dtype
-    configured_dtype_label = input_dtype_label(configured_dtype)
+    configured_dtype_label = str(INPUT_DTYPE).removeprefix("torch.")
     print(f"\n[{device.upper()}] common Triton JIT kernel coverage: {len(ops)} ops")
 
     for name in ops:
-        import time
         t0 = time.time()
         key = f"tl.{name}"
         try:
@@ -1590,13 +1399,18 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     torch.exp(torch.maximum(x, torch.zeros_like(x))),
                 )
             elif name in UNARY_MODES:
+                if name in ROUNDING_UNARY:
+                    x = stepped_input(device)
+                elif name not in POSITIVE_ONLY_UNARY:
+                    x = signed_input(device)
                 kernel, kernel_args, expected = (
                     kernels.unary,
                     (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS, UNARY_MODES[name]),
                     unary_reference(name, x),
                 )
             elif name in BINARY_MODES:
-                y = positive_input(device)
+                x = signed_input(device)
+                y = signed_nonzero_input(device)
                 out = torch.empty_like(x)
                 expected = {
                     "fdiv": x / y,
@@ -1611,7 +1425,8 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, y, out, RBLN_BATCH, ROWS, COLS, BINARY_MODES[name],
                 )
             elif name == "where":
-                y = positive_input(device)
+                x = signed_input(device)
+                y = signed_input(device)
                 out = torch.empty_like(x)
                 kernel, kernel_args, expected = (
                     kernels.where,
@@ -1688,7 +1503,8 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, CONTROL_MODES[name],
                 )
             elif name in MISC_MODES:
-                y = positive_input(device)
+                x = signed_input(device)
+                y = signed_input(device)
                 if name == "cast":
                     x = torch.arange(
                         RBLN_BATCH * ROWS * COLS,
@@ -1747,6 +1563,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, RANDOM_MODES[name],
                 )
             elif name in SCAN_MODES:
+                x = signed_input(device)
                 out = torch.empty_like(x)
                 if name in {"cumsum", "associative_scan"}:
                     expected = torch.cumsum(x, dim=2)
@@ -1758,6 +1575,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, SCAN_MODES[name],
                 )
             elif name in ORDERING_MODES:
+                x = signed_input(device)
                 if name == "softmax":
                     x = x.reshape(ROWS, RBLN_BATCH, COLS)
                     batch, rows = ROWS, RBLN_BATCH
@@ -1784,6 +1602,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     x, y, out, RBLN_BATCH, ROWS, COLS, LAYOUT_MODES[name],
                 )
             elif name in ARG_REDUCE_MODES:
+                x = signed_input(device)
                 if name == "xor_sum":
                     x = torch.randint(
                         0, 1 << 16, x.shape,
@@ -1942,7 +1761,7 @@ def run_common_shared_suite(args, triton_module, tl_module):
             def launch():
                 kernel[(1,)](*kernel_args)
 
-            run_quietly(launch, _sync_device)
+            benchmark.run_quietly(launch, benchmark._sync_device)
             if expected is None:
                 ok = bool(torch.isfinite(out).all())
                 detail = (
@@ -1950,58 +1769,55 @@ def run_common_shared_suite(args, triton_module, tl_module):
                     "sentinel_exec=PASS"
                 )
             elif name == "cat":
-                ok, max_abs, max_rel = _compare_tensors(
+                ok, max_abs, max_rel = results._compare_tensors(
                     torch.sort(out.reshape(-1)).values,
                     torch.sort(expected.reshape(-1)).values,
                 )
-                detail = _format_error_detail(
+                detail = results._format_error_detail(
                     f"common-kernel:{name}", max_abs, max_rel,
                     reference="torch",
                 )
             else:
-                ok, max_abs, max_rel = _compare_tensors(out, expected)
-                detail = _format_error_detail(
+                ok, max_abs, max_rel = results._compare_tensors(out, expected)
+                detail = results._format_error_detail(
                     f"common-kernel:{name}", max_abs, max_rel,
                     reference="torch",
                 )
-            _record_validation(
-                results, key, "tl",
-                input_dtype_label(kernel_args[0].dtype),
+            results._record_validation(
+                records, key, "tl",
+                str(kernel_args[0].dtype).removeprefix("torch."),
                 "exec+perf", t0, ok, detail,
                 launch, args.warmup, args.rep,
             )
         except Exception as exc:
-            _record(
-                results, key, "tl", configured_dtype_label,
-                "exec", TestResult.ERROR, t0,
+            results._record(
+                records, key, "tl", configured_dtype_label,
+                "exec", results.TestResult.ERROR, t0,
                 detail=str(exc)[:1000],
             )
-    return results
+    return records
 
 def test_tl_only(args):
-    """Run one canonical kernel per shared op, with legacy-only API fallbacks."""
     available = tuple(collect_tl_symbols())
-    requested = {
-        part.strip() for part in getattr(args, "only", "").split(",")
-        if part.strip()
-    }
+    requested = {op.strip() for op in getattr(args, "only", "").split(",") if op.strip()}
     unknown = sorted(requested - set(available))
     if unknown:
         raise ValueError("Unknown triton.language op selection: " + ", ".join(unknown))
-    selected = tuple(name for name in available if not requested or name in requested)
-    common_ops = tuple(name for name in selected if name in COMMON_SHARED_OPS)
-    legacy_ops = tuple(name for name in selected if name not in COMMON_SHARED_OPS)
+    
+    selected = tuple(op for op in available if not requested or op in requested)
+    common_ops = tuple(op for op in selected if op in COMMON_SHARED_OPS)
+    legacy_ops = tuple(op for op in selected if op not in COMMON_SHARED_OPS)
 
-    results = {}
+    records = {}
     if common_ops:
         common_args = copy.copy(args)
         common_args.only = ",".join(common_ops)
-        results.update(run_common_shared_suite(common_args, triton, tl))
+        records.update(run_shared_tl(common_args, triton, tl))
     if legacy_ops:
         legacy_args = copy.copy(args)
         legacy_args.only = ",".join(legacy_ops)
-        results.update(_run_upstream_only_tl_ops(legacy_args))
-    return results
+        records.update(_run_unshared_tl(legacy_args))
+    return records
 
 # ---------------------------------------------------------------------------
 # libdevice all-wrapper real compile/run/perf smoke tests
@@ -2013,7 +1829,7 @@ class Sig:
     output: str
     label: str = ""
 
-def _raw_exported_libdevice_functions() -> List[str]:
+def _exported_libdevice_functions() -> List[str]:
     if libdevice is None:
         return []
     out = []
@@ -2028,9 +1844,6 @@ def _raw_exported_libdevice_functions() -> List[str]:
             out.append(name)
     return sorted(out)
 
-def _exported_libdevice_functions() -> List[str]:
-    return [f for f in _raw_exported_libdevice_functions() if f not in EXCLUDED_LIBDEVICE_FUNCS]
-
 def _count_callables(obj) -> int:
     c = 0
     for name in dir(obj):
@@ -2044,11 +1857,9 @@ def _count_callables(obj) -> int:
     return c
 
 def collect_api_availability() -> Dict[str, int]:
-    """Availability counts are API-symbol counts, not execution tests."""
     cuda_mod = getattr(extra, "cuda", None)
     return {
         "tl": _count_callables(tl),
-        "libdevice_raw": len(_raw_exported_libdevice_functions()),
         "libdevice": len(_exported_libdevice_functions()),
         "extra": _count_callables(cuda_mod) if cuda_mod is not None else 0,
     }
@@ -2170,7 +1981,6 @@ def _exact_sigs(fn: str) -> List[Sig]:
 
     return []
 
-
 def _generic_sigs(arity: int) -> List[Sig]:
     if arity == 1:
         return [
@@ -2222,7 +2032,7 @@ def _other_literal(t: str) -> str:
 
 def _make_lib_tensor(fn: str, t: str, n: int, arg_idx: int) -> torch.Tensor:
     dt = _torch_dtype_from_tag(t)
-    dev = _runtime_device()
+    dev = benchmark._runtime_device()
     if fn in {"jn", "yn"} and arg_idx == 0:
         return (torch.arange(n, device=dev, dtype=torch.int32) % 6).to(dt)
     if fn in {"ldexp", "scalbn"} and arg_idx == 1:
@@ -2275,7 +2085,7 @@ def _make_lib_smoke_kernel_module(fn: str, sig: Sig):
     lines.append("    tl.store(o + offs, r, mask=m)")
 
     mod_name = f"_triton_libdev_{fn}_{abs(hash((fn, sig.inputs, sig.output)))}"
-    return _load_temp_module(lines, f"triton_libdev_{fn}_", mod_name)
+    return benchmark._load_temp_module(lines, f"triton_libdev_{fn}_", mod_name)
 
 def _bytes_moved(tensors: Sequence[torch.Tensor], out: torch.Tensor, n: int) -> int:
     b = out.element_size() * n
@@ -2491,7 +2301,7 @@ def _libdevice_reference(fn: str, tensors: Sequence[torch.Tensor], sig: Sig) -> 
 
     return None, "smoke_only"
 
-def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
+def _run_one_libdevice_smoke(fn: str, args) -> results.TestResultInfo:
     start_all = time.time()
     grid = (triton.cdiv(args.size, args.block),)
     last_err = ""
@@ -2500,23 +2310,23 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
         try:
             module, temp_path = _make_lib_smoke_kernel_module(fn, sig)
             tensors = [_make_lib_tensor(fn, t, args.size, i) for i, t in enumerate(sig.inputs)]
-            out = torch.empty((args.size,), device=_runtime_device(), dtype=_torch_dtype_from_tag(sig.output))
+            out = torch.empty((args.size,), device=benchmark._runtime_device(), dtype=_torch_dtype_from_tag(sig.output))
 
-            launch = _make_launch(module._k, grid, *tensors, out, args.size, args.block)
-            run_quietly(launch, _sync_device)
+            launch = benchmark._make_launch(module._k, grid, *tensors, out, args.size, args.block)
+            benchmark.run_quietly(launch, benchmark._sync_device)
             expected, reference = _libdevice_reference(fn, tensors, sig)
             ok = True
             detail = f"validated-smoke:{fn}; ref={reference}; max_abs=NA; max_rel=NA"
             if expected is not None:
-                ok, max_abs, max_rel = _compare_tensors(out, expected)
-                detail = _format_error_detail(f"validated-libdevice:{fn}", max_abs, max_rel, reference=reference)
-            ms = benchmark_quietly(launch, args.warmup, args.rep)
-            _sync_device()
+                ok, max_abs, max_rel = results._compare_tensors(out, expected)
+                detail = results._format_error_detail(f"validated-libdevice:{fn}", max_abs, max_rel, reference=reference)
+            ms = benchmark.benchmark_quietly(launch, args.warmup, args.rep)
+            benchmark._sync_device()
             gbps = _bytes_moved(tensors, out, args.size) / (ms * 1e-3) / 1e9 if ms and ms > 0 else 0.0
             sample = out[:1].detach().cpu().flatten()[0].item()
             detail = f"{detail}; sample={sample}"
-            return TestResultInfo(
-                result=TestResult.PASS if ok else TestResult.FAIL,
+            return results.TestResultInfo(
+                result=results.TestResult.PASS if ok else results.TestResult.FAIL,
                 execution_time=time.time() - start_all,
                 module="libdevice",
                 dtype=_sig_str(sig),
@@ -2524,15 +2334,15 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
                 ms=ms if ok else None,
                 gbps=gbps if ok else None,
                 detail=detail,
-                device=_device_string(),
+                device=benchmark._device_string(),
             )
         except Exception as e:
             last_err = f"{_sig_str(sig)}: {type(e).__name__}: {str(e).splitlines()[0][:240]}"
         finally:
-            _unlink_quietly(temp_path)
+            benchmark._unlink_quietly(temp_path)
 
-    return TestResultInfo(
-        result=TestResult.ERROR,
+    return results.TestResultInfo(
+        result=results.TestResult.ERROR,
         execution_time=time.time() - start_all,
         module="libdevice",
         dtype="-",
@@ -2540,49 +2350,37 @@ def _run_one_libdevice_smoke(fn: str, args) -> TestResultInfo:
         ms=None,
         gbps=None,
         detail=last_err or "no candidate signature worked",
-        device=_device_string(),
+        device=benchmark._device_string(),
     )
 
-def test_libdevice_only(args) -> Dict[str, TestResultInfo]:
-    results: Dict[str, TestResultInfo] = {}
+def test_libdevice_only(args) -> Dict[str, results.TestResultInfo]:
+    records: Dict[str, results.TestResultInfo] = {}
 
     if libdevice is None:
         print("\n[libdevice] libdevice is not available in this Triton install. Skipping libdevice tests.")
-        return results
+        return records
 
     funcs = _exported_libdevice_functions()
     if args.only:
         wanted = {x.strip() for x in args.only.split(",") if x.strip()}
-        excluded_requested = sorted(wanted & EXCLUDED_LIBDEVICE_FUNCS)
         funcs = [f for f in funcs if f in wanted]
-        missing = sorted(wanted - set(funcs) - EXCLUDED_LIBDEVICE_FUNCS)
-        if excluded_requested:
-            print(f"Requested libdevice names are intentionally excluded: {excluded_requested}")
+        missing = sorted(wanted - set(funcs))
         if missing:
             print(f"Requested libdevice names not found: {missing}")
 
-    if not args.only and EXCLUDED_LIBDEVICE_FUNCS:
-        excluded_present = sorted(EXCLUDED_LIBDEVICE_FUNCS & set(_raw_exported_libdevice_functions()))
-        if excluded_present:
-            print(f"ℹExcluded libdevice wrappers: {', '.join(excluded_present)}")
-
-    if not args.only and args.expect_libdevice_count and len(funcs) != args.expect_libdevice_count:
-        print(f"Expected {args.expect_libdevice_count} libdevice callables, found {len(funcs)} in this Triton build.")
-        print("Continuing anyway; Triton versions can export 197/198/etc. wrappers.")
-
-    print(f"\n[libdevice] Real compile/run/perf smoke tests for {len(funcs)} exported wrappers on {_device_string()}")
+    print(f"\n[libdevice] Real compile/run/perf smoke tests for {len(funcs)} exported wrappers on {benchmark._device_string()}")
     print(f"size={args.size}, block={args.block}, warmup={args.warmup}, rep={args.rep}\n")
     print(f"{'function':32} {'status':8} {'signature':22} {'ms':>10} {'GB/s':>10}    detail")
     print("-" * 96)
 
     for fn in funcs:
         r = _run_one_libdevice_smoke(fn, args)
-        results[f"libdevice.{fn}"] = r
-        _print_perf_row(fn, r)
-    return results
+        records[f"libdevice.{fn}"] = r
+        results._print_perf_row(fn, r)
+    return records
 
 # ---------------------------------------------------------------------------
-# extra.cuda real smoke/perf tests
+# extra.cuda tests
 # ---------------------------------------------------------------------------
 
 EXTRA_CUDA_VALUE_INTRINSICS = {"globaltimer", "smid", "num_threads", "num_warps"}
@@ -2632,32 +2430,32 @@ def _make_extra_cuda_kernel_module(functions: List[str]):
                 "    tl.store(o + offs, back, mask=m)",
                 "",
             ]
-    return _load_temp_module(src, "triton_real_extra_cuda_", "_triton_real_extra_cuda")
+    return benchmark._load_temp_module(src, "triton_real_extra_cuda_", "_triton_real_extra_cuda")
 
-def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
+def _run_one_extra_cuda(fn: str, km, args) -> results.TestResultInfo:
     t0 = time.time()
     try:
         k = getattr(km, f"_cuda_{fn}_k")
         if fn in EXTRA_CUDA_FLOAT8_CONVERT:
             n = args.size
             grid = (triton.cdiv(n, args.block),)
-            x = torch.linspace(-1.75, 1.75, n, device=_runtime_device(), dtype=torch.float32)
+            x = torch.linspace(-1.75, 1.75, n, device=benchmark._runtime_device(), dtype=torch.float32)
             out = torch.empty_like(x)
 
-            launch = _make_launch(k, grid, x, out, n, args.block, num_warps=4)
-            run_quietly(launch, _sync_device)
+            launch = benchmark._make_launch(k, grid, x, out, n, args.block, num_warps=4)
+            benchmark.run_quietly(launch, benchmark._sync_device)
             sample = out[:n]
             ok = bool(torch.isfinite(sample).all() and (sample.abs() <= 1.7501).all())
             max_abs = float(torch.max(torch.abs(sample - x.clamp(-1.75, 1.75))).item())
             detail = f"validated-float8-roundtrip:{fn}; ref=invariant; max_abs={max_abs:.6g}; max_rel=NA; sample={float(sample[0].item())}"
-            ms = benchmark_quietly(launch, args.warmup, args.rep) if ok else None
-            gbps = _gbps(n, torch.float32, 1, 1, ms) if ok and ms else None
-            return TestResultInfo(TestResult.PASS if ok else TestResult.FAIL, time.time() - t0, "cuda", "fp32", "exec+perf", ms, gbps, detail, _device_string())
+            ms = benchmark.benchmark_quietly(launch, args.warmup, args.rep) if ok else None
+            gbps = benchmark._gbps(n, torch.float32, 1, 1, ms) if ok and ms else None
+            return results.TestResultInfo(results.TestResult.PASS if ok else results.TestResult.FAIL, time.time() - t0, "cuda", "fp32", "exec+perf", ms, gbps, detail, benchmark._device_string())
 
-        out = torch.empty(1, device=_runtime_device(), dtype=torch.int64)
+        out = torch.empty(1, device=benchmark._runtime_device(), dtype=torch.int64)
 
-        launch = _make_launch(k, (1,), out, num_warps=4)
-        run_quietly(launch, _sync_device)
+        launch = benchmark._make_launch(k, (1,), out, num_warps=4)
+        benchmark.run_quietly(launch, benchmark._sync_device)
         val = int(out.item())
         if fn == "num_warps":
             ok = val == 4
@@ -2671,23 +2469,23 @@ def _run_one_extra_cuda(fn: str, km, args) -> TestResultInfo:
         else:
             ok = val >= 0
             detail = f"validated-special-register:{fn}; ref=invariant; sample={val}"
-        ms = benchmark_quietly(launch, args.warmup, args.rep) if ok else None
-        return TestResultInfo(TestResult.PASS if ok else TestResult.FAIL, time.time() - t0, "cuda", "int64", "exec+perf", ms, None, detail, _device_string())
+        ms = benchmark.benchmark_quietly(launch, args.warmup, args.rep) if ok else None
+        return results.TestResultInfo(results.TestResult.PASS if ok else results.TestResult.FAIL, time.time() - t0, "cuda", "int64", "exec+perf", ms, None, detail, benchmark._device_string())
     except Exception as e:
-        return TestResultInfo(TestResult.ERROR, time.time() - t0, "cuda", "-", "exec", None, None, str(e)[:1000], _device_string())
+        return results.TestResultInfo(results.TestResult.ERROR, time.time() - t0, "cuda", "-", "exec", None, None, str(e)[:1000], benchmark._device_string())
 
-def test_extra_only(args) -> Dict[str, TestResultInfo]:
-    results: Dict[str, TestResultInfo] = {}
+def test_extra_only(args) -> Dict[str, results.TestResultInfo]:
+    records: Dict[str, results.TestResultInfo] = {}
 
     avail = _extra_cuda_callables()
     if not avail:
         print("\n[extra] extra.cuda is not available in this Triton install.")
-        return results
+        return records
 
     supported = EXTRA_CUDA_VALUE_INTRINSICS | EXTRA_CUDA_GDC_INTRINSICS | EXTRA_CUDA_FLOAT8_CONVERT
     candidates = [f for f in avail if f in supported]
     unsupported = [f for f in avail if f not in supported]
-    print(f"\n[extra.cuda] Real smoke + performance tests on {_device_string()}")
+    print(f"\n[extra.cuda] Real smoke + performance tests on {benchmark._device_string()}")
     print(f"Detected callable extra.cuda functions: {len(avail)}")
     print(f"Runnable extra.cuda tests: {len(candidates)}")
     if unsupported:
@@ -2695,18 +2493,18 @@ def test_extra_only(args) -> Dict[str, TestResultInfo]:
 
     if not candidates:
         print("No supported extra.cuda functions found. Nothing to execute.")
-        return results
+        return records
 
     km, kpath = _make_extra_cuda_kernel_module(candidates)
     try:
         for fn in candidates:
             r = _run_one_extra_cuda(fn, km, args)
-            results[f"cuda.{fn}"] = r
-            _print_perf_row(fn, r, dtype_width=8, mode_width=12)
+            records[f"cuda.{fn}"] = r
+            results._print_perf_row(fn, r, dtype_width=8, mode_width=12)
     finally:
-        _unlink_quietly(kpath)
+        benchmark._unlink_quietly(kpath)
 
-    return results
+    return records
 
 # ---------------------------------------------------------------------------
 # CPU/CUDA backend dispatch
@@ -2718,11 +2516,9 @@ def _check_cpu_capability() -> None:
         triton.runtime.driver.set_active_to_cpu()
     except Exception as exc:
         raise RuntimeError(
-            "CPU device requested, but the Triton CPU driver could not be "
-            f"activated. Check the triton-cpu image: {exc}"
+            "CPU device requested, but the Triton CPU driver could not be activated. "
+            f"Check the triton-cpu image: {exc}"
         ) from exc
-
-    print("Triton CPU driver activated via set_active_to_cpu().")
     print("CPU Triton backend capability check passed.")
 
 def _check_cuda_capability() -> None:
@@ -2730,45 +2526,38 @@ def _check_cuda_capability() -> None:
         raise RuntimeError("CUDA is not available.")
 
 def run_cpu(args):
-    benchmark_module._set_runtime_device("cpu")
+    benchmark._set_runtime_device("cpu")
     _check_cpu_capability()
 
-    print("[CPU] CPU mode tests tl only. Skipping CUDA backend extensions.")
+    print("[CPU] Running tl tests on the CPU backend.")
     print(f"Triton: {getattr(triton, '__version__', 'unknown')}")
-    print(f"Device: {_device_string()}")
-    args.module = "tl"
+    print(f"Device: {benchmark._device_string()}")
 
-    results = test_tl_only(args)
+    records = test_tl_only(args)
+
     api = {"tl": len(collect_tl_symbols()), "libdevice": 0, "extra": 0}
-    return results, triton, api
+
+    return records, triton, api
 
 def run_cuda(args):
-    benchmark_module._set_runtime_device("cuda")
+    benchmark._set_runtime_device("cuda")
     _check_cuda_capability()
 
     print(f"Triton: {getattr(triton, '__version__', 'unknown')}")
-    print(f"Device: {_device_string()}")
+    print(f"Device: {benchmark._device_string()}")
 
-    if args.module in {"tl", "triton.language"}:
-        results = test_tl_only(args)
-    elif args.module == "libdevice":
-        results = test_libdevice_only(args)
-    elif args.module == "extra":
-        results = test_extra_only(args)
-    else:
-        results = {}
-        results.update(test_tl_only(args))
-        results.update(test_libdevice_only(args))
-        results.update(test_extra_only(args))
+    records = {}
+    records.update(test_tl_only(args))
+    records.update(test_libdevice_only(args))
+    records.update(test_extra_only(args))
 
     api = collect_api_availability()
-    return results, triton, api
+
+    return records, triton, api
 
 def run(args):
     if args.device == "cpu":
         return run_cpu(args)
     if args.device == "cuda":
         return run_cuda(args)
-    raise ValueError(
-        f"cpu_gpu only supports 'cpu' or 'cuda', got {args.device!r}"
-    )
+    raise ValueError(f"Unsupported device: {args.device!r}. Expected 'cpu' or 'cuda'.")

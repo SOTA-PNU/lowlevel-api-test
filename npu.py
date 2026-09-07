@@ -1,13 +1,13 @@
-import argparse
 import json
-import math
+import argparse
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import benchmark
+import results
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("RBLN_USE_CUSTOM_KERNEL", "1")
@@ -19,17 +19,7 @@ import rebel.triton.language as rbln_tl
 from rebel.triton.language.extra.rbln import libdevice as rblib
 from torch.library import register_fake, triton_op
 
-import benchmark as benchmark_module
-import results as results_module
-from results import (
-    TestResult,
-    _compare_tensors,
-    _format_error_detail,
-    _record,
-    _record_validation,
-)
-
-benchmark_module._configure_triton(rbln_triton, rbln_tl)
+benchmark._set_triton_modules(rbln_triton, rbln_tl)
 
 from cpu_gpu import (
     BINARY_MODES,
@@ -40,7 +30,10 @@ from cpu_gpu import (
     CREATION_MODES,
     DOT_SIZE,
     HINT_MODES,
+    INPUT_DTYPE,
     KERNELS,
+    POSITIVE_ONLY_UNARY,
+    ROUNDING_UNARY,
     LAYOUT_MODES,
     MEMORY_MODES,
     META_RUNTIME_MODES,
@@ -60,19 +53,14 @@ from cpu_gpu import (
     TL_META_COMPILE,
     UNARY_MODES,
     collect_tl_symbols,
-    input_dtype_label,
     positive_input,
+    signed_input,
+    signed_nonzero_input,
+    stepped_input,
     swizzle2d_reference,
     unary_reference,
     validate_meta_symbol,
 )
-
-_SharedCardError = benchmark_module._SharedCardError
-_benchmark_compiled = benchmark_module._benchmark_compiled
-_measure_energy_mj_per_call = benchmark_module._measure_energy_mj_per_call
-_power_is_stable = benchmark_module._power_is_stable
-_rbln_timer_us = benchmark_module._rbln_timer_us
-_target_power_snapshot = benchmark_module._target_power_snapshot
 
 RBLN_KERNELS = KERNELS
 _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
@@ -376,19 +364,17 @@ def shared_tensor_compile_fake(x: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(x)
 
 def _selected_ops(only):
-    """Select from every callable exported by rebel.triton.language."""
     available = tuple(collect_tl_symbols())
     if not only:
         return available
 
-    requested = tuple(part.strip() for part in only.split(",") if part.strip())
+    requested = tuple(op.strip() for op in only.split(",") if op.strip())
     unknown = sorted(set(requested) - set(available))
     if unknown:
-        raise ValueError(
-            "Unknown rebel.triton.language op selection: " + ", ".join(unknown)
-        )
+        raise ValueError("Unsupported rebel.triton.language op(s) requested: "+ ", ".join(unknown))
+
     requested_set = set(requested)
-    return tuple(name for name in available if name in requested_set)
+    return tuple(op for op in available if op in requested_set)
 
 class UnaryModel(torch.nn.Module):
     def forward(self, x):
@@ -502,43 +488,43 @@ class TensorCompileModel(torch.nn.Module):
     def forward(self, x):
         return torch.ops.rbln_triton_ops.shared_tensor_compile(x)
 
-def _case(name):
+def _make_test_case(op):
+    normalize = (
+        (lambda t: torch.sort(t.reshape(-1)).values) if op == "cat"
+        else (lambda t: t)
+    )
     x = positive_input()
-    if name == "block_type":
-        return BlockTypeModel(), (x,), None
-    if name == "tensor":
-        return TensorCompileModel(), (x,), torch.exp(x)
-    if name in TL_META_COMPILE:
-        model = ConstCompileModel() if name == "const" else MetaCompileModel()
-        expected = torch.exp(x) if name == "inline_asm_elementwise" else None
-        return model, (x,), expected
-    if name == "dot_scaled":
-        # Encoded E4M3 zero operands with E8M0 scale 1 (biased exponent 127).
+    if op == "block_type":
+        return BlockTypeModel(), (x,), None, normalize
+    if op == "tensor":
+        return TensorCompileModel(), (x,), torch.exp(x), normalize
+    if op in TL_META_COMPILE:
+        model = ConstCompileModel() if op == "const" else MetaCompileModel()
+        expected = torch.exp(x) if op == "inline_asm_elementwise" else None
+        return model, (x,), expected, normalize
+    if op == "dot_scaled":
         a = torch.zeros((16, 64), dtype=torch.uint8)
         b = torch.zeros((64, 16), dtype=torch.uint8)
         a_scale = torch.full((16, 2), 127, dtype=torch.uint8)
         b_scale = torch.full((16, 2), 127, dtype=torch.uint8)
         expected = torch.zeros((16, 16), dtype=torch.float32)
-        return DotScaledModel(), (a, b, a_scale, b_scale), expected
-    if name == "tensor":
-        return UnaryModel(), (x,), torch.abs(x)
-    if name == "zeros":
+        return DotScaledModel(), (a, b, a_scale, b_scale), expected, normalize
+    if op == "zeros":
         x = torch.linspace(
             -1.0, 1.0, RBLN_BATCH * ROWS * COLS, dtype=x.dtype
         ).reshape(
             RBLN_BATCH, ROWS, COLS
         )
-        return ZerosModel(), (x,), torch.exp(torch.maximum(x, torch.zeros_like(x)))
-    if name in UNARY_MODES:
-        if name in {"ceil", "floor"}:
-            x = (
-                (torch.arange(RBLN_BATCH * ROWS * COLS) % 8).to(x.dtype)
-                - 4.0
-                + 0.25
-            ).reshape(RBLN_BATCH, ROWS, COLS)
-        return UnaryModel(), (x,), unary_reference(name, x)
-    if name in BINARY_MODES:
-        y = positive_input()
+        return ZerosModel(), (x,), torch.exp(torch.maximum(x, torch.zeros_like(x))), normalize
+    if op in UNARY_MODES:
+        if op in ROUNDING_UNARY:
+            x = stepped_input()
+        elif op not in POSITIVE_ONLY_UNARY:
+            x = signed_input()
+        return UnaryModel(), (x,), unary_reference(op, x), normalize
+    if op in BINARY_MODES:
+        x = signed_input()
+        y = signed_nonzero_input()
         expected = {
             "fdiv": x / y,
             "maximum": torch.maximum(x, y),
@@ -547,132 +533,122 @@ def _case(name):
             "sub": x - y,
             "mul": x * y,
             "div_rn": x / y,
-        }[name]
-        return BinaryModel(), (x, y), expected
-    if name == "where":
-        y = positive_input()
-        return WhereModel(), (x, y), torch.where(x > y, x, y)
-    if name in REDUCE_MODES:
-        reduced = getattr(torch, name)(x, dim=2, keepdim=True)
+        }[op]
+        return BinaryModel(), (x, y), expected, normalize
+    if op == "where":
+        x = signed_input()
+        y = signed_input()
+        return WhereModel(), (x, y), torch.where(x > y, x, y), normalize
+    if op in REDUCE_MODES:
+        reduced = getattr(torch, op)(x, dim=2, keepdim=True)
         if isinstance(reduced, tuple):
             reduced = reduced.values
-        if name == "max":
+        if op == "max":
             expected = torch.exp(x - reduced)
-        elif name == "min":
+        elif op == "min":
             expected = torch.exp(reduced - x)
         else:
             expected = torch.exp(x) / reduced
-        return ReduceModel(), (x,), expected
-    if name in SHAPE_MODES:
-        if name in {"broadcast", "broadcast_to"}:
+        return ReduceModel(), (x,), expected, normalize
+    if op in SHAPE_MODES:
+        if op in {"broadcast", "broadcast_to"}:
             expected = torch.exp(x - x.sum(dim=2, keepdim=True))
-        elif name == "expand_dims":
+        elif op == "expand_dims":
             x = x[0].contiguous()
             expected = torch.exp(x)
-        elif name == "reshape":
+        elif op == "reshape":
             expected = torch.exp(x)
         else:
             x = x[0].contiguous()
             expected = x.t().contiguous()
-        return ShapeModel(), (x,), expected
-    if name == "dot":
-        a = torch.randn(
-            (RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype
-        )
-        b = torch.randn(
-            (RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype
-        )
-        return DotModel(), (a, b), a @ b
-    if name in MEMORY_MODES:
-        if name == "advance":
-            x = torch.rand(
-                (RBLN_BATCH, ROWS, COLS * 2), dtype=x.dtype
-            ) + 0.25
-        return MemoryModel(), (x,), torch.exp(x)
-    if name in MISC_MODES:
-        y = positive_input()
-        if name == "cast":
-            x = torch.arange(
-                RBLN_BATCH * ROWS * COLS, dtype=torch.int32
-            ).reshape(RBLN_BATCH, ROWS, COLS)
+        return ShapeModel(), (x,), expected, normalize
+    if op == "dot":
+        a = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
+        b = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
+        return DotModel(), (a, b), a @ b, normalize
+    if op in MEMORY_MODES:
+        if op == "advance":
+            x = torch.rand((RBLN_BATCH, ROWS, COLS * 2), dtype=x.dtype) + 0.25
+        return MemoryModel(), (x,), torch.exp(x), normalize
+    if op in MISC_MODES:
+        x = signed_input()
+        y = signed_input()
+        if op == "cast":
+            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.int32).reshape(RBLN_BATCH, ROWS, COLS)
         expected = {
             "cast": x.to(torch.float32),
             "clamp": torch.clamp(x, -0.5, 0.5),
             "fma": x * y + 1.0,
-        }[name]
-        return MiscModel(), (x, y), expected
-    if name in CREATION_MODES:
+        }[op]
+        return MiscModel(), (x, y), expected, normalize
+    if op in CREATION_MODES:
         base = torch.arange(COLS).reshape(1, 1, COLS).expand_as(x).float()
         expected = {
             "arange": base,
             "full": torch.exp(x + 3.0),
             "zeros_like": torch.exp(x),
             "cdiv": torch.div(base + 2, 2, rounding_mode="floor"),
-        }[name]
-        return CreationModel(), (x,), expected
-    if name in HINT_MODES:
-        # Weak [1, 1, 1] hint attributes are valid for this constant tensor.
+        }[op]
+        return CreationModel(), (x,), expected, normalize
+    if op in HINT_MODES:
         x = torch.zeros_like(x)
-        return HintModel(), (x,), None
-    if name in PROGRAM_MODES:
-        expected = torch.zeros_like(x) if name == "program_id" else torch.ones_like(x)
-        return ProgramModel(), (x,), expected
-    if name in NPU_CONTROL_MODES:
-        return NpuControlModel(), (x,), torch.zeros_like(x)
-    if name in RANDOM_MODES:
-        return RandomModel(), (x,), None
-    if name in SCAN_MODES:
-        if name in {"cumsum", "associative_scan"}: expected = torch.cumsum(x, dim=2)
-        elif name == "cumprod": expected = torch.cumprod(x, dim=2)
+        return HintModel(), (x,), None, normalize
+    if op in PROGRAM_MODES:
+        expected = torch.zeros_like(x) if op == "program_id" else torch.ones_like(x)
+        return ProgramModel(), (x,), expected, normalize
+    if op in NPU_CONTROL_MODES:
+        return NpuControlModel(), (x,), torch.zeros_like(x), normalize
+    if op in RANDOM_MODES:
+        return RandomModel(), (x,), None, normalize
+    if op in SCAN_MODES:
+        x = signed_input()
+        if op in {"cumsum", "associative_scan"}: expected = torch.cumsum(x, dim=2)
+        elif op == "cumprod": expected = torch.cumprod(x, dim=2)
         else: expected = x.sum(dim=2, keepdim=True).expand_as(x)
-        return ScanModel(), (x,), expected
-    if name in ORDERING_MODES:
-        if name == "softmax":
+        return ScanModel(), (x,), expected, normalize
+    if op in ORDERING_MODES:
+        x = signed_input()
+        if op == "softmax":
             x = x.reshape(ROWS, RBLN_BATCH, COLS)
             expected = torch.softmax(x, dim=0)
         else:
             expected = torch.sort(x, dim=2).values
-        return OrderingModel(), (x,), expected
-    if name in LAYOUT_MODES:
+        return OrderingModel(), (x,), expected, normalize
+    if op in LAYOUT_MODES:
         y = positive_input()
-        expected = torch.flip(x, dims=[2]) if name == "flip" else torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
-        return LayoutModel(), (x, y), expected
-    if name in ARG_REDUCE_MODES:
-        if name == "xor_sum":
+        expected = torch.flip(x, dims=[2]) if op == "flip" else torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
+        return LayoutModel(), (x, y), expected, normalize
+    if op in ARG_REDUCE_MODES:
+        x = signed_input()
+        if op == "xor_sum":
             x = torch.randint(0, 1 << 16, x.shape, dtype=torch.int32)
-        if name == "argmax": reduced = torch.argmax(x, dim=2, keepdim=True)
-        elif name == "argmin": reduced = torch.argmin(x, dim=2, keepdim=True)
+        if op == "argmax": reduced = torch.argmax(x, dim=2, keepdim=True)
+        elif op == "argmin": reduced = torch.argmin(x, dim=2, keepdim=True)
         else:
             reduced = x[:, :, :1]
             for i in range(1, COLS): reduced = torch.bitwise_xor(reduced, x[:, :, i:i + 1])
-        return ArgReduceModel(), (x,), reduced.expand_as(x).to(x.dtype)
-    if name in ATOMIC_MODES:
+        return ArgReduceModel(), (x,), reduced.expand_as(x).to(x.dtype), normalize
+    if op in ATOMIC_MODES:
         atomic_input = torch.zeros_like(x, dtype=torch.int32)
-        return AtomicModel(), (atomic_input,), torch.zeros_like(atomic_input)
-    if name in NPU_SHAPE_MODES:
+        return AtomicModel(), (atomic_input,), torch.zeros_like(atomic_input), normalize
+    if op in NPU_SHAPE_MODES:
         y = positive_input()
-        if name == "join": expected = torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
-        elif name == "split": expected = torch.cat((x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 0], x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 1]), dim=2)
+        if op == "join": expected = torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
+        elif op == "split": expected = torch.cat((x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 0], x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 1]), dim=2)
         else: expected = x
-        return NpuShapeModel(), (x, y), expected
-    if name in NPU_MISC_OPS:
-        if name == "umulhi":
-            x = torch.randint(
-                1 << 29, 1 << 30, x.shape, dtype=torch.int32
-            )
-            y = torch.randint(
-                1 << 29, 1 << 30, x.shape, dtype=torch.int32
-            )
-            expected = (
-                (x.to(torch.int64) * y.to(torch.int64)) >> 32
-            ).to(torch.int32)
+        return NpuShapeModel(), (x, y), expected, normalize
+    if op in NPU_MISC_OPS:
+        if op == "umulhi":
+            x = torch.randint(1 << 29, 1 << 30, x.shape, dtype=torch.int32)
+            y = torch.randint(1 << 29, 1 << 30, x.shape, dtype=torch.int32)
+            expected = ((x.to(torch.int64) * y.to(torch.int64)) >> 32).to(torch.int32)
         else:
             y = positive_input()
             expected = swizzle2d_reference()
-        return NpuMiscModel(), (x, y), expected
-    if name in META_RUNTIME_MODES:
+        return NpuMiscModel(), (x, y), expected, normalize
+    if op in META_RUNTIME_MODES:
         y = positive_input()
-        if name == "PropagateNan":
+        if op == "PropagateNan":
             flat_x, flat_y = x.reshape(-1), y.reshape(-1)
             flat_x[0::3] = float("nan")
             flat_y[1::3] = float("nan")
@@ -680,179 +656,97 @@ def _case(name):
             none_values = torch.fmax(x, y)
             lane = torch.arange(COLS).reshape(1, 1, COLS)
             expected = torch.where(lane < COLS // 2, all_values, none_values)
-        elif name == "range":
+        elif op == "range":
             expected = torch.full_like(x, 6)
-        elif name == "device_print":
+        elif op == "device_print":
             expected = x
-        elif name == "gather":
+        elif op == "gather":
             expected = torch.roll(x, shifts=-1, dims=2)
-        elif name == "histogram":
-            x = (
-                torch.arange(
-                    RBLN_BATCH * ROWS * COLS, dtype=torch.int32
-                ) % COLS
-            ).reshape(RBLN_BATCH, ROWS, COLS)
+        elif op == "histogram":
+            x = (torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.int32) % COLS).reshape(RBLN_BATCH, ROWS, COLS)
             y = torch.zeros_like(x)
             counts = torch.bincount(x.reshape(-1).to(torch.int64), minlength=COLS)
             expected = counts.reshape(1, 1, COLS).expand_as(x).to(x.dtype)
         else:
             expected = x
-        return MetaRuntimeModel(), (x, y), expected
+        return MetaRuntimeModel(), (x, y), expected, normalize
     expected = (
-        None if name in {"static_assert", "static_print"}
-        else torch.exp(torch.exp(x)) if name == "static_range"
+        None if op in {"static_assert", "static_print"}
+        else torch.exp(torch.exp(x)) if op == "static_range"
         else torch.exp(x)
     )
-    return ControlModel(), (x,), expected
+    return ControlModel(), (x,), expected, normalize
 
+def _run_worker(op, warmup, rep):
+    model, inputs, expected, normalize = _make_test_case(op)
+    compiled = torch.compile(model, backend="rbln", dynamic=False, options={"mode": ["strict"]})
+    actual = compiled(*inputs)
 
-def _run_worker(name, warmup, rep, energy_seconds):
-    model, inputs, expected = _case(name)
-    dtype = input_dtype_label(inputs[0].dtype)
-    print(f"RBLN_OP_DTYPE={dtype}", flush=True)
-    compiled = torch.compile(
-        model, backend="rbln", dynamic=False, options={"mode": ["strict"]}
-    )
-    capture_reports = getattr(rebel, "capture_reports", None)
-    capture_reports = capture_reports if callable(capture_reports) else None
-    if capture_reports is None:
-        actual = compiled(*inputs)
-    else:
-        with capture_reports() as _discarded_reports:
-            actual = compiled(*inputs)
     if expected is None:
         ok = bool(torch.isfinite(actual).all())
         max_abs = max_rel = 0.0
-    elif name == "cat":
-        ok, max_abs, max_rel = _compare_tensors(
-            torch.sort(actual.reshape(-1)).values,
-            torch.sort(expected.reshape(-1)).values,
-        )
     else:
-        ok, max_abs, max_rel = _compare_tensors(actual, expected)
-    ms = timer_source = timer_warning = None
+        ok, max_abs, max_rel = results._compare_tensors(normalize(actual), normalize(expected))
+
+    ms = None
     if ok:
-        ms, timer_source, timer_warning = benchmark_module._benchmark_compiled(
-            compiled, inputs, warmup, rep, capture_reports
-        )
-    energy_mj_per_call = energy_source = energy_warning = None
-    if ok and energy_seconds > 0:
-        if name == "device_print":
-            energy_warning = "energy measurement skipped for device_print"
-        else:
-            try:
-                (
-                    energy_mj_per_call,
-                    energy_source,
-                    energy_warning,
-                ) = benchmark_module._measure_energy_mj_per_call(
-                    compiled, inputs, energy_seconds
-                )
-            except Exception as exc:
-                energy_warning = f"{type(exc).__name__}: {exc}"[:300]
+        ms = benchmark._benchmark_compiled(compiled, inputs, warmup, rep, 
+                                           getattr(rebel, "capture_reports", None))[0]
+
     payload = {
         "ok": ok,
         "max_abs": max_abs,
         "max_rel": max_rel,
         "has_reference": expected is not None,
-        "dtype": dtype,
         "ms": ms,
-        "timer_source": timer_source,
-        "timer_warning": timer_warning,
-        "energy_mj_per_call": energy_mj_per_call,
-        "energy_source": energy_source,
-        "energy_warning": energy_warning,
     }
     print("RBLN_OP_RESULT=" + json.dumps(payload), flush=True)
 
-def _worker_env(name):
+def _worker_env(op):
     env = dict(os.environ)
-    env["RBLN_TRITON_TEST_OP"] = name
+    env["RBLN_TRITON_TEST_OP"] = op
     env["RBLN_RUNTIME_TIMER"] = "1"
-    env["PYTHONPATH"] = os.pathsep.join(
-        path for path in (REPO_ROOT, env.get("PYTHONPATH")) if path
-    )
-    env["PATH"] = os.pathsep.join(
-        path for path in (os.path.dirname(sys.executable), env.get("PATH")) if path
-    )
+    env["PYTHONPATH"] = os.pathsep.join(path for path in (REPO_ROOT, env.get("PYTHONPATH")) if path)
+    env["PATH"] = os.pathsep.join(path for path in (os.path.dirname(sys.executable), env.get("PATH")) if path)
     return env
 
-def _fallback_detail(output):
-    for line in reversed(output.splitlines()):
-        line = line.strip()
-        if any(token in line for token in (
-            "error recorded", "error:", "RBLNCompileError", "Graph Optimization:",
-        )):
-            return "RBLN compiler fell back to eager CPU execution: " + line[-600:]
-    return "RBLN compiler fell back to eager CPU execution"
-
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_DIAGNOSTICS = (
+    (r"error:\s*([^\n]+)", "RBLN lowering error: {}"),
+    (
+        r"(?:error:\s*)?(Dialect [`\'][^\n]+?custom op [`\'][^`\'\n]+[`\'])",
+        "RBLN lowering error: {}",
+    ),
+    (r"ValueError\(([^\n]+)\)", "Triton frontend error: ValueError({})"),
+    (r"CompilationError:\s*([^\n]+)", "Triton compilation error: {}"),
+    (r"RBLNCompileError:\s*([^\n]+)", "RBLN compile error: {}"),
+    (r"RBLNRuntimeError:\s*([^\n]+)", "RBLN model compiler error: {}"),
+)
 
 def _compiler_error_detail(output, returncode):
-    """Reduce a native/compiler traceback to one actionable report line."""
     if returncode < 0:
-        signal_number = -returncode
-        signal_name = {6: "SIGABRT", 11: "SIGSEGV"}.get(
-            signal_number, f"signal {signal_number}"
+        signal = {6: "SIGABRT", 11: "SIGSEGV"}.get(
+            -returncode, f"signal {-returncode}"
         )
-        return f"RBLN compiler crash ({signal_name}) during Triton/RTOSA compilation"
+        return f"RBLN compiler crash ({signal}) during Triton/RTOSA compilation"
 
     clean = _ANSI_ESCAPE.sub("", output)
 
-    mlir_error = re.search(r"error:\s*([^\n]+)", clean)
-    if mlir_error:
-        return "RBLN lowering error: " + mlir_error.group(1).strip()
-
-    dialect = re.search(
-        r"(?:error:\s*)?(Dialect [`'][^\n]+?custom op [`'][^`'\n]+[`'])",
-        clean,
-    )
-    if dialect:
-        return "RBLN lowering error: " + dialect.group(1).strip()
-
-    frontend = re.search(r"ValueError\(([^\n]+)\)", clean)
-    if frontend:
-        return "Triton frontend error: ValueError(" + frontend.group(1).strip() + ")"
-
-    compilation = re.search(r"CompilationError:\s*([^\n]+)", clean)
-    if compilation and compilation.group(1).strip():
-        return "Triton compilation error: " + compilation.group(1).strip()
-
-    rbln = re.search(r"RBLNCompileError:\s*([^\n]+)", clean)
-    if rbln:
-        return "RBLN compile error: " + rbln.group(1).strip()
-
-    rbln_runtime = re.search(r"RBLNRuntimeError:\s*([^\n]+)", clean)
-    if rbln_runtime:
-        return "RBLN model compiler error: " + rbln_runtime.group(1).strip()
+    for pattern, template in _DIAGNOSTICS:
+        match = re.search(pattern, clean)
+        if match and match.group(1).strip():
+            return template.format(match.group(1).strip())
 
     for exception_name in ("AttributeError", "RuntimeError", "TypeError"):
         matches = re.findall(rf"{exception_name}:\s*([^\n]+)", clean)
         if matches:
             return f"{exception_name}: {matches[-1].strip()}"
 
-    phase = re.search(
-        r"(Graph (?:Generation|Optimization):\s*\[[A-Z_]+\])", clean
-    )
+    phase = re.search(r"(Graph (?:Generation|Optimization):\s*\[[A-Z_]+\])", clean)
     if phase:
         return "RBLN compile error: " + phase.group(1)
 
     return f"RBLN worker failed (exit={returncode}); no structured diagnostic"
-
-
-def _finite_nonnegative_number(value, field):
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{field} must be a finite nonnegative number")
-    try:
-        converted = float(value)
-    except (OverflowError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{field} must be a finite nonnegative number"
-        ) from exc
-    if not math.isfinite(converted) or converted < 0:
-        raise ValueError(f"{field} must be a finite nonnegative number")
-    return converted
-
 
 def _decode_worker_payload(raw):
     try:
@@ -869,161 +763,112 @@ def _decode_worker_payload(raw):
     for field in ("ok", "has_reference"):
         if type(payload[field]) is not bool:
             raise ValueError(f"{field} must be a boolean")
-    for field in ("max_abs", "max_rel"):
-        payload[field] = _finite_nonnegative_number(payload[field], field)
-
-    if "dtype" in payload and (
-        not isinstance(payload["dtype"], str) or not payload["dtype"].strip()
-    ):
-        raise ValueError("dtype must be a non-empty string")
-    for field in ("ms", "energy_mj_per_call"):
-        value = payload.get(field)
-        if value is not None:
-            payload[field] = _finite_nonnegative_number(value, field)
-    for field in (
-        "timer_source", "timer_warning", "energy_source", "energy_warning"
-    ):
-        value = payload.get(field)
-        if value is not None and not isinstance(value, str):
-            raise ValueError(f"{field} must be a string or null")
     return payload
 
-def _run_language_suite(args):
-    results = {}
+def _report_dtype(op):
+    try:
+        _, inputs, _, _ = _make_test_case(op)
+        return str(inputs[0].dtype).removeprefix("torch.")
+    except Exception:
+        return "-"
+
+def _run_npu_tl(args):
+    records = {}
     ops = _selected_ops(args.only)
-    executable_ops = set(SUPPORTED_OPS)
-    configured_dtype = positive_input().dtype
-    configured_dtype_label = input_dtype_label(configured_dtype)
-    energy_seconds = float(getattr(args, "energy_seconds", 3.0))
-    worker_timeout = 320 + energy_seconds
-    print(
-        f"\n[NPU] rebel.triton.language full callable coverage: {len(ops)} ops; "
-        f"warmup={args.warmup}, rep={args.rep}, "
-        f"energy={energy_seconds:g}s, worker timeout={worker_timeout:g}s",
-        flush=True,
-    )
-    for name in ops:
+    supported_ops = set(SUPPORTED_OPS)
+    worker_timeout = 300
+    print(f"\n[NPU] rebel.triton.language callable coverage: {len(ops)} ops", flush=True)
+ 
+    for op in ops:
         t0 = time.time()
-        key = f"tl.{name}"
-        if name in TL_META_COMPILE:
+        key = f"tl.{op}"
+        dtype = _report_dtype(op)
+        # Validate meta APIs
+        if op in TL_META_COMPILE:
             try:
-                validate_meta_symbol(name, torch_dtype=configured_dtype)
+                validate_meta_symbol(op, torch_dtype=INPUT_DTYPE)
             except Exception as exc:
-                _record(
-                    results, key, "tl", configured_dtype_label, "api+frontend",
-                    TestResult.ERROR, t0,
+                results._record(
+                    records, key, "tl", dtype, "api+frontend",
+                    results.TestResult.ERROR, t0,
                     detail=f"API validation failed: {type(exc).__name__}: {exc}",
                 )
                 continue
-        if name not in executable_ops:
-            _record(
-                results, key, "tl", configured_dtype_label,
-                "kernel", TestResult.ERROR, t0,
+        # Check whetjer the op has RBLN execution adapter
+        if op not in supported_ops:
+            results._record(
+                records, key, "tl", dtype,
+                "kernel", results.TestResult.ERROR, t0,
                 detail="no RBLN compile/execute kernel adapter is defined",
             )
             continue
-        process_env = _worker_env(name)
+        # Run op in subprocess
+        process_env = _worker_env(op)
         try:
-            with tempfile.TemporaryDirectory(
-                prefix=f"rbln-triton-{name}-"
-            ) as triton_home:
+            with tempfile.TemporaryDirectory(prefix=f"rbln-triton-{op}-") as triton_home:
                 process_env["TRITON_HOME"] = triton_home
                 process = subprocess.run(
-                    [
-                        sys.executable, "-m", __name__, "--worker", name,
-                        "--warmup", str(args.warmup), "--rep", str(args.rep),
-                        "--energy-seconds", str(energy_seconds),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    env=process_env,
-                    cwd=triton_home,
-                    timeout=worker_timeout,
-                    check=False,
+                    [sys.executable, "-m", __name__, "--worker", op,
+                        "--warmup", str(args.warmup), "--rep", str(args.rep)],
+                    capture_output=True, text=True, env=process_env,
+                    cwd=triton_home, timeout=worker_timeout, check=False
                 )
         except subprocess.TimeoutExpired:
-            _record(
-                results, key, "tl", configured_dtype_label, "kernel",
-                TestResult.ERROR, t0,
-                detail=f"RBLN worker timed out after {worker_timeout:g}s",
+            results._record(
+                records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
+                detail=f"RBLN worker timed out after {worker_timeout}s"
             )
             continue
-        combined_output = process.stdout + "\n" + process.stderr
-        dtype_marker = "RBLN_OP_DTYPE="
-        dtype_line = next(
-            (
-                line for line in process.stdout.splitlines()
-                if line.startswith(dtype_marker)
-            ),
-            None,
-        )
-        dtype = (
-            dtype_line[len(dtype_marker):].strip()
-            if dtype_line is not None else configured_dtype_label
-        )
-        if "Fallback to eager execution" in combined_output:
-            _record(
-                results, key, "tl", dtype, "kernel", TestResult.ERROR, t0,
-                detail=_fallback_detail(combined_output),
-            )
-            continue
-
+        # Check fallback 
+        output_log = process.stdout + "\n" + process.stderr
+        # Check worker payload and record results
         marker = "RBLN_OP_RESULT="
-        marker_line = next(
-            (line for line in process.stdout.splitlines() if line.startswith(marker)),
-            None,
-        )
+        marker_line = next((line for line in process.stdout.splitlines() if line.startswith(marker)), None)
         if process.returncode == 0 and marker_line is not None:
             try:
                 payload = _decode_worker_payload(marker_line[len(marker):])
             except ValueError as exc:
-                _record(
-                    results, key, "tl", dtype, "kernel", TestResult.ERROR, t0,
+                results._record(
+                    records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
                     detail=f"invalid RBLN worker payload: {exc}"[:1000],
                 )
                 continue
+
             benchmark_ms = payload.get("ms")
             if payload.get("ok") and benchmark_ms is None:
-                _record(
-                    results, key, "tl", payload.get("dtype", dtype),
-                    "exec+perf", TestResult.ERROR, t0,
-                    detail=f"invalid RBLN benchmark payload: ms={benchmark_ms!r}",
+                results._record(
+                    records, key, "tl", dtype, "exec+perf", results.TestResult.ERROR, t0,
+                    detail=f"invalid RBLN benchmark payload: ms={benchmark_ms!r}"
                 )
                 continue
-            energy_mj_per_call = payload.get("energy_mj_per_call")
+
             if payload.get("has_reference", True):
-                detail = _format_error_detail(
-                    f"rbln-custom-kernel:{name}", payload["max_abs"],
-                    payload["max_rel"], reference="torch",
+                detail = results._format_error_detail(
+                    f"rbln-custom-kernel:{op}", payload["max_abs"],
+                    payload["max_rel"], reference="torch"
                 )
             else:
                 detail = (
-                    f"rbln-custom-kernel:{name}; "
+                    f"rbln-custom-kernel:{op}; "
                     "target_result=N/A; sentinel_exec=PASS"
                 )
-            if payload.get("timer_source"):
-                detail += f"; perf={payload['timer_source']}"
-            if payload.get("timer_warning"):
-                detail += f"; perf_warning={payload['timer_warning']}"
-            if payload.get("energy_source"):
-                detail += f"; energy={payload['energy_source']}"
-            if payload.get("energy_warning"):
-                detail += f"; energy_warning={payload['energy_warning']}"
-            _record_validation(
-                results, key, "tl", payload.get("dtype", dtype), "exec+perf", t0,
-                payload["ok"], detail, ms=benchmark_ms,
-                energy_mj_per_call=energy_mj_per_call,
-            )
-            if not payload.get("has_reference", True):
-                results[key].accuracy_status = "N/A"
-        else:
-            detail = _compiler_error_detail(combined_output, process.returncode)
-            _record(
-                results, key, "tl", dtype, "kernel", TestResult.ERROR, t0,
-                detail=detail[:1000],
-            )
-    return results
 
+            results._record_validation(
+                records, key, "tl", dtype, "exec+perf", t0,
+                payload["ok"], detail, ms=benchmark_ms,
+            )
+
+            if not payload.get("has_reference", True):
+                records[key].accuracy_status = "N/A"
+
+        else:
+            detail = _compiler_error_detail(output_log, process.returncode)
+            results._record(
+                records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
+                detail=detail[:1000]
+            )
+
+    return records
 
 def _capability_check() -> None:
     print("\n[NPU] Checking Triton NPU backend capability...", flush=True)
@@ -1040,216 +885,64 @@ def _capability_check() -> None:
 
     if "rebel" not in backends:
         raise RuntimeError("Rebellions Triton backend 'rebel' is not registered.")
+
     try:
         is_active = bool(backends["rebel"].driver.is_active())
     except Exception as exc:
         raise RuntimeError(
             f"Failed to inspect the rebel backend state: {exc}"
         ) from exc
+    
     if not is_active:
         raise RuntimeError(
             "The rebel backend is installed but inactive. "
             "Check the NPU device, driver, and Docker device mounts."
         )
+    
     print("NPU Triton backend capability check passed.")
 
-
-def _device_inventory() -> dict:
-    """Return rbln-smi/rbln-stat JSON without making discovery mandatory."""
-    for executable in ("rbln-smi", "rbln-stat"):
-        path = shutil.which(executable)
-        if path is None:
-            continue
+def _device_info() -> str:
+    for command in ("rbln-smi", "rbln-stat"):
         try:
-            process = subprocess.run(
-                [path, "--json"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if process.returncode != 0:
+            out = subprocess.run([command, "--json"], capture_output=True, text=True, timeout=5, check=True).stdout
+            devices = json.loads(out)["devices"]
+            if not devices:
                 continue
-            inventory = json.loads(process.stdout)
-            if (
-                isinstance(inventory, dict)
-                and isinstance(inventory.get("devices"), list)
-            ):
-                return inventory
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-            continue
-    return {"devices": []}
-
-def _device_label(torch_module) -> str:
-    devices = _device_inventory().get("devices", [])
-    if devices:
-        models = []
-        for device in devices:
-            model = device.get("name", "unknown")
-            if model not in models:
-                models.append(model)
-        serials = {
-            device.get("sid") for device in devices if device.get("sid")
-        }
-        card_count = len(serials) if serials else len(devices)
-        return (
-            f"NPU ({', '.join(models)}; "
-            f"{card_count} cards, {len(devices)} chips)"
-        )
-
-    npu_module = getattr(torch_module, "npu", None)
-    if npu_module is not None and hasattr(npu_module, "get_device_name"):
-        try:
-            return f"NPU ({npu_module.get_device_name(0)})"
+            models = dict.fromkeys(d.get("name", "unknown") for d in devices)
+            cards = {d.get("sid") for d in devices if d.get("sid")}
+            return (
+                f"NPU ({', '.join(models)}; "
+                f"{len(cards) or len(devices)} cards, {len(devices)} chips)"
+            )
         except Exception:
-            pass
+            continue
     return "NPU"
 
-TRITON_EXAMPLES = [
-    ("vector_add_rank3", "01_vector_add_rank3.py"),
-    ("fused_softmax", "02_fused_softmax.py"),
-    ("matmul", "03_matmul.py"),
-    ("layer_norm_forward", "05_layer_norm_forward.py"),
-    ("flash_attention", "06_flash_attention.py"),
-    ("math_function", "07_math_function.py"),
-    ("block_scaled_matmul", "10_block_scaled_matmul.py"),
-]
-
-def _run_integration_examples(repo_root: str) -> dict:
-    """Run every RBLN Triton integration example in an isolated process."""
-    examples_dir = os.environ.get(
-        "RBLN_TRITON_EXAMPLES_DIR",
-        os.path.join(repo_root, "rbln_triton"),
-    )
-
-    print(
-        "\n[NPU] Running RBLN Triton kernel examples "
-        "(torch.compile backend='rbln')"
-    )
-    print(f"[NPU] examples dir: {examples_dir}")
-    if not os.path.isdir(examples_dir):
-        raise RuntimeError(
-            f"NPU integration examples directory not found: {examples_dir}. "
-            "Mount the repository rbln_triton directory into the container."
-        )
-
-    missing_examples = [
-        os.path.join(examples_dir, filename)
-        for _, filename in TRITON_EXAMPLES
-        if not os.path.isfile(os.path.join(examples_dir, filename))
-    ]
-    if missing_examples:
-        raise RuntimeError(
-            "NPU integration tests cannot run because example files are missing: "
-            + ", ".join(missing_examples)
-        )
-
-    print(f"{'example':<22}{'status':<8}detail")
-    results = {}
-    for index, (name, filename) in enumerate(TRITON_EXAMPLES, 1):
-        print(
-            f"[NPU] [example {index}/{len(TRITON_EXAMPLES)}] Starting {name}",
-            flush=True,
-        )
-        t0 = time.time()
-        path = os.path.join(examples_dir, filename)
-        env = dict(os.environ)
-        env.pop("RBLN_WRITE_RTOSA", None)
-        env["PYTHONPATH"] = ""
-        env["PATH"] = os.pathsep.join(
-            item
-            for item in (os.path.dirname(sys.executable), env.get("PATH"))
-            if item
-        )
-        process = subprocess.run(
-            [sys.executable, path],
-            cwd=examples_dir,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        passed = process.returncode == 0 and "PASSED" in process.stdout
-        detail = "" if passed else f"exit={process.returncode}"
-        print(f"{name:<22}{'PASS' if passed else 'FAIL':<8}{detail}")
-        results_module._record(
-            results,
-            f"integration.{name}",
-            "integration",
-            "fp32",
-            "compile+exec",
-            results_module.TestResult.PASS
-            if passed
-            else results_module.TestResult.ERROR,
-            t0,
-            detail="RBLN integration example" if passed else detail,
-        )
-        if not passed:
-            tail = (
-                process.stdout[-1500:] + "\n" + process.stderr[-1500:]
-            ).strip()
-            print("  ----- output (tail) -----")
-            for line in tail.splitlines()[-25:]:
-                print(f"  {line}")
-            print("  -------------------------")
-
-    all_ok = all(
-        result.result == results_module.TestResult.PASS
-        for result in results.values()
-    )
-    status = "ALL PASSED" if all_ok else "SOME FAILED"
-    print(f"\n[NPU] Triton-examples-on-NPU: {status}")
-    return results
-
 def run(args):
-    print(
-        "Using rebel.triton (RBLN) "
-        f"v{getattr(rbln_triton, '__version__', '?')}"
-    )
+    print("Using rebel.triton (RBLN) " f"v{getattr(rbln_triton, '__version__', '?')}")
     _capability_check()
-    benchmark_module._set_runtime_device(
-        "npu", _device_label(benchmark_module.torch)
-    )
+    benchmark._set_runtime_device("npu", _device_info())
     print(f"Triton: {getattr(rbln_triton, '__version__', 'unknown')}")
-    print(f"Device: {benchmark_module._device_string()}")
+    print(f"Device: {benchmark._device_string()}")
 
-    results = {}
-    if args.module in {"tl", "triton.language", "all"}:
-        results.update(_run_language_suite(args))
-
-    if args.module == "all":
-        results.update(_run_integration_examples(REPO_ROOT))
-    elif args.module not in {"tl", "triton.language"}:
-        raise RuntimeError(
-            f"NPU module '{args.module}' is unsupported; "
-            "use --module tl or --module all"
-        )
+    records = _run_npu_tl(args)
 
     api = {
         "tl": len(collect_tl_symbols()),
         "libdevice": 0,
-        "extra": 0,
+        "extra": 0
     }
-    return results, rbln_triton, api
+
+    return records, rbln_triton, api
 
 if __name__ == "__main__" and os.environ.get("RBLN_WRITE_RTOSA") != "1":
     worker_parser = argparse.ArgumentParser()
     worker_parser.add_argument("--worker", required=True, metavar="OP")
     worker_parser.add_argument("--warmup", type=int, default=25)
     worker_parser.add_argument("--rep", type=int, default=100)
-    worker_parser.add_argument("--energy-seconds", type=float, default=3.0)
     worker_args = worker_parser.parse_args()
-    if worker_args.warmup < 0:
-        worker_parser.error("--warmup must be >= 0")
-    if worker_args.rep < 1:
-        worker_parser.error("--rep must be >= 1")
-    if (
-        not math.isfinite(worker_args.energy_seconds)
-        or worker_args.energy_seconds < 0
-    ):
-        worker_parser.error("--energy-seconds must be finite and >= 0")
     _run_worker(
         worker_args.worker,
         worker_args.warmup,
         worker_args.rep,
-        worker_args.energy_seconds,
     )

@@ -17,10 +17,8 @@
 그렇지 않으면 CPU를 선택합니다. NPU는 자동으로 선택하지 않으므로
 `--device npu`를 명시적으로 사용해야 합니다.
 
-CPU 모드는 항상 `tl` 스위트를 실행합니다. NPU 모드는 `tl`,
-`triton.language` 또는 `all`을 허용합니다. CUDA 모드는 `tl`,
-`triton.language`, `libdevice`, `extra` 또는 `all`을 허용하며,
-`triton.language`은 `tl`의 별칭입니다.
+실행 범위는 디바이스가 정합니다. CPU와 NPU는 `tl` 스위트를, CUDA는
+`tl`, `libdevice`, `extra`를 모두 실행합니다.
 
 ## 테스트 대상
 
@@ -78,50 +76,39 @@ round-trip 불변 조건으로 검증합니다.
 1. CLI 옵션을 해석하고 요청한 백엔드를 선택합니다.
 2. 백엔드별 Triton 구현을 import하고 해당 드라이버를 사용할 수 있는지
    확인합니다.
-3. callable API를 탐색하고 `--module`을 적용하며, `tl` 및 `libdevice`
-   스위트에는 `--only`도 적용합니다.
+3. callable API를 탐색하고 `tl` 및 `libdevice` 스위트에는 `--only`를
+   적용합니다.
 4. 연산에 맞는 입력과 PyTorch 참조값 또는 불변 조건을 생성합니다.
 5. 실제 커널을 컴파일하고 launch합니다. 각 NPU 연산자는 별도의 임시
    `TRITON_HOME`을 사용하는 격리된 worker process에서 실행됩니다.
 6. 출력을 검증하고 숫자 참조값이 있으면 `max_abs`와 `max_rel`을
    계산합니다.
-7. 지원되는 benchmark와 선택적인 NPU 에너지 측정을 실행합니다.
+7. 지원되는 benchmark를 실행합니다.
 8. 통합 보고서를 출력하고 해당하는 경우 디스크에 기록합니다.
 
 주요 명령어:
 
 ```bash
-# 선택한 백엔드가 지원하는 모든 모듈 실행
+# 선택한 백엔드가 지원하는 스위트 전체 실행
 python triton_test.py --device cuda
 python triton_test.py --device cpu
 python triton_test.py --device npu
 
-# 단일 모듈 실행
-python triton_test.py --device cuda --module tl
-python triton_test.py --device cuda --module libdevice
-python triton_test.py --device cuda --module extra
-python triton_test.py --device npu --module tl
-
-# 선택한 연산자 실행
-python triton_test.py --device cuda --module tl --only exp,sum,dot
-python triton_test.py --device npu --module tl --only exp,sum,dot
-python triton_test.py --device cuda --module libdevice --only sin,cos,mul24
-
-# 실행 가능한 모듈 목록 출력
-python triton_test.py --list
+# 선택한 연산자만 실행
+python triton_test.py --device cuda --only exp,sum,dot
+python triton_test.py --device npu --only exp,sum,dot
+python triton_test.py --device cuda --only sin,cos,mul24
 ```
 
 주요 CLI 기본값:
 
 | 옵션 | 기본값 | 의미 |
 |---|---:|---|
-| `--module` | `all` | 요청한 모듈 집합 |
 | `--device` | `auto` | CUDA를 사용할 수 있으면 CUDA, 그렇지 않으면 CPU |
 | `--size` | `1,048,576` | 크기를 설정할 수 있는 1차원 테스트의 길이 |
 | `--block` | `256` | 크기를 설정할 수 있는 1차원 테스트의 block size |
 | `--warmup` | `25` | `triton.testing.do_bench`에서는 밀리초 단위 warmup budget, fallback 및 RBLN timing에서는 launch 횟수 |
 | `--rep` | `100` | `triton.testing.do_bench`에서는 밀리초 단위 측정 budget, fallback 및 RBLN timing에서는 launch 횟수 |
-| `--dtype` | `fp32` | 호환성을 위한 옵션으로, 현재 스위트 전체의 dtype sweep을 강제하지 않음 |
 
 ## PASS, FAIL 및 정확도 검증
 
@@ -162,9 +149,9 @@ abs(actual - expected) <= 1e-2 + 1e-2 * abs(expected)
 - 의미 있는 숫자 target이 없는 API는 sentinel 또는 불변 조건 검사를
   실행하고 `accuracy=N/A`로 기록합니다.
 
-기본적으로 `FAIL` 또는 `ERROR`가 하나라도 있으면 process는 status 1로
-종료합니다. `--soft-fail-results`를 사용하면 기록된 실패는 유지하면서
-완료된 스위트가 status 0을 반환하도록 할 수 있습니다. 백엔드 설정 실패는
+개별 테스트의 `FAIL`이나 `ERROR`는 exit status를 바꾸지 않습니다.
+스위트가 끝까지 돌면 status 0으로 종료하고, 실패는 보고서에만 기록합니다.
+import, 백엔드 설정, 디바이스 초기화처럼 스위트 자체를 못 돌리는 오류는
 계속 non-zero status를 반환합니다.
 
 ## 성능 측정
@@ -199,30 +186,12 @@ GB/s = bytes moved / elapsed seconds / 1e9
 NPU timing은 `rebel.capture_reports`를 통해 수집한 RBLN
 `total_device` timer를 사용하며, 누적된 microsecond 값을 `rep`으로
 나눕니다. timer를 사용할 수 없거나 값이 유효하지 않으면 스위트는 동기화된
-host wall time을 사용하고 `perf_warning`을 기록합니다. 연산자마다 전송
+host wall time을 사용합니다. 연산자마다 전송
 의미가 다르므로 NPU `GB/s`는 의도적으로 비워 둡니다.
-
-NPU 에너지 측정에는 `rbln-smi --json`을 사용합니다.
-
-1. 안정적인 idle card power baseline을 수집합니다.
-2. 컴파일된 연산을 최소 `--energy-seconds` 동안 반복 호출합니다.
-3. 최근 power sample 3개의 범위가 5% 이내인지 확인합니다.
-4. idle 값을 차감한 dynamic card energy를 다음과 같이 기록합니다.
-
-```text
-mJ/call = (active watts - idle watts) * elapsed seconds / calls * 1000
-```
-
-telemetry를 사용할 수 없거나, 다른 process가 card를 공유하거나, sample이
-안정화되지 않으면 `energy_warning`을 기록하고 에너지 값은 비워 둡니다.
-이는 기능 검증 실패로 처리하지 않습니다. 에너지 측정을 비활성화하려면
-`--energy-seconds 0`을 사용합니다. `device_print`도 에너지 측정을
-건너뛰고 `energy_warning`을 기록합니다.
 
 ## 테스트 데이터 타입과 shape
 
-`--dtype`는 CLI 호환성을 위해 유지되지만 현재 전체 테스트 dtype을
-선택하지는 않습니다. 각 스위트가 연산에 필요한 타입을 선택합니다.
+dtype은 CLI로 고르지 않습니다. 각 스위트가 연산에 필요한 타입을 선택합니다.
 
 | 테스트 범위 | 주요 dtype | 주요 shape | 설정 |
 |---|---|---|---|
@@ -260,19 +229,18 @@ function에는 범위가 제한된 입력을 사용합니다. 정수/bit 연산�
 - 탐색된 API 개수
 - 모듈별 합계
 - `name`, `module`, `dtype`, `exec`, `accuracy`, `ms`,
-  `GB/s`, `mJ/call` 및 `detail`이 포함된 상세 행
+  `GB/s` 및 `detail`이 포함된 상세 행
 - 실패하거나 error가 발생한 테스트의 최종 목록
 
-`--module all` 실행은 다음 파일에 기록합니다.
+보고서는 terminal 출력으로만 남고 파일로 저장하지 않습니다. 남겨 두려면
+직접 리다이렉트합니다.
 
-```text
-reports/report_all_operators.txt
+```bash
+python triton_test.py --device npu | tee report.txt
 ```
 
-다음 CUDA 또는 NPU `--module all` 실행이 기존 파일을 덮어씁니다.
-모듈만 실행하면 terminal에만 출력하고 보고서 파일은 기록하지 않습니다.
-현재 CPU runner는 범위를 `tl`로 정규화하므로 원래 명령에서 기본
-`--module all`을 사용하더라도 CPU 결과는 현재 console에만 출력됩니다.
+CI에서는 job 로그에 그대로 찍힙니다. 리포트를 실패 판정보다 먼저
+출력하므로 테스트가 `FAIL`로 끝나도 로그에 남습니다.
 
 ## 설정
 
@@ -309,7 +277,7 @@ CPU도 소스 빌드를 없애려면 호환되는 `triton-cpu` wheel을 별도�
 
 ```bash
 export TRITON_CPU_BACKEND=1
-python triton_test.py --device cpu --module tl
+python triton_test.py --device cpu
 ```
 
 CPU Docker image를 생성하려면 다음 명령을 사용합니다.
@@ -393,8 +361,7 @@ python -c "from rebel.triton.backends import backends; assert 'rebel' in backend
 
 ```bash
 unset TRITON_BACKENDS_IN_TREE
-PYTHONPATH="" python triton_test.py --device npu --module tl
-PYTHONPATH="" python triton_test.py --device npu --module all
+PYTHONPATH="" python triton_test.py --device npu
 ```
 
 NPU Docker build에서는 인증된 RBLN Python index에 접근할 수 있도록

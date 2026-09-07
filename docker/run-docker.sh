@@ -4,11 +4,6 @@ set -e
 
 DOCKER_IMAGE_REF="${DOCKER_IMAGE:-ghcr.io/sota-pnu/lowlevel-api-test}:${DOCKER_IMAGE_TAG}"
 COMMANDS="test-cpu test-cuda test-npu"
-TEST_RESULT_POLICY_ARG=""
-if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
-    TEST_RESULT_POLICY_ARG="--soft-fail-results"
-fi
-
 check_docker() {
     if ! docker info > /dev/null 2>&1; then
         echo "Docker is not running. Please start Docker and try again."
@@ -38,12 +33,6 @@ sync_test_sources() {
     done
 }
 
-sync_npu_examples() {
-    echo ">>> Copying current NPU test examples to container..."
-    docker exec "$CONTAINER_NAME" rm -rf /workspace/rbln_triton
-    docker cp rbln_triton "$CONTAINER_NAME:/workspace/rbln_triton"
-}
-
 run_test() {
     local device="$1"
     echo "Running Triton tests on device: $device"
@@ -71,13 +60,11 @@ run_test() {
             sleep infinity
 
         sync_test_sources
-        sync_npu_examples
 
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
-            /opt/triton-venv/bin/python -u triton_test.py --device npu \
-            $TEST_RESULT_POLICY_ARG
+            /opt/triton-venv/bin/python -u triton_test.py --device npu
 
     elif [ "$device" = "cuda" ]; then
         echo "Starting GPU test container..."
@@ -94,8 +81,7 @@ run_test() {
 
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python -u triton_test.py --device cuda \
-            $TEST_RESULT_POLICY_ARG
+            /opt/triton-venv/bin/python -u triton_test.py --device cuda
 
     elif [ "$device" = "cpu" ]; then
         echo "Starting CPU test container..."
@@ -111,8 +97,7 @@ run_test() {
 
         echo ">>> Running tests..."
         docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python -u triton_test.py --device cpu \
-            $TEST_RESULT_POLICY_ARG
+            /opt/triton-venv/bin/python -u triton_test.py --device cpu
 
     else
         echo "Unknown device: $device"
