@@ -17,10 +17,8 @@
 그렇지 않으면 CPU를 선택합니다. NPU는 자동으로 선택하지 않으므로
 `--device npu`를 명시적으로 사용해야 합니다.
 
-CPU 모드는 항상 `tl` 스위트를 실행합니다. NPU 모드는 `tl`,
-`triton.language` 또는 `all`을 허용합니다. CUDA 모드는 `tl`,
-`triton.language`, `libdevice`, `extra` 또는 `all`을 허용하며,
-`triton.language`은 `tl`의 별칭입니다.
+실행 범위는 디바이스가 정합니다. CPU와 NPU는 `tl` 스위트를, CUDA는
+`tl`, `libdevice`, `extra`를 모두 실행합니다.
 
 ## 테스트 대상
 
@@ -71,13 +69,6 @@ CUDA extra 스위트는 `triton.language.extra.cuda`에서 탐색한 API 중
 비교할 PyTorch 참조값이 없으면 launch metadata 또는 범위/유한성
 round-trip 불변 조건으로 검증합니다.
 
-### 회귀 테스트
-
-독립적인 pytest 검사는 공통 tolerance 정책, 연산자별 override가 없음을
-확인하는 검사, NPU benchmark/결과 helper 및 기본 CPU/CUDA smoke 동작을
-다룹니다. 이 검사는 테스트 프레임워크 자체를 검증하며
-`triton_test.py` 연산자 보고서에는 포함되지 않습니다.
-
 ## 테스트 과정
 
 각 실행은 다음과 같은 상위 수준의 순서로 진행됩니다.
@@ -85,50 +76,39 @@ round-trip 불변 조건으로 검증합니다.
 1. CLI 옵션을 해석하고 요청한 백엔드를 선택합니다.
 2. 백엔드별 Triton 구현을 import하고 해당 드라이버를 사용할 수 있는지
    확인합니다.
-3. callable API를 탐색하고 `--module`을 적용하며, `tl` 및 `libdevice`
-   스위트에는 `--only`도 적용합니다.
+3. callable API를 탐색하고 `tl` 및 `libdevice` 스위트에는 `--only`를
+   적용합니다.
 4. 연산에 맞는 입력과 PyTorch 참조값 또는 불변 조건을 생성합니다.
 5. 실제 커널을 컴파일하고 launch합니다. 각 NPU 연산자는 별도의 임시
    `TRITON_HOME`을 사용하는 격리된 worker process에서 실행됩니다.
 6. 출력을 검증하고 숫자 참조값이 있으면 `max_abs`와 `max_rel`을
    계산합니다.
-7. 지원되는 benchmark와 선택적인 NPU 에너지 측정을 실행합니다.
+7. 지원되는 benchmark를 실행합니다.
 8. 통합 보고서를 출력하고 해당하는 경우 디스크에 기록합니다.
 
 주요 명령어:
 
 ```bash
-# 선택한 백엔드가 지원하는 모든 모듈 실행
+# 선택한 백엔드가 지원하는 스위트 전체 실행
 python triton_test.py --device cuda
 python triton_test.py --device cpu
 python triton_test.py --device npu
 
-# 단일 모듈 실행
-python triton_test.py --device cuda --module tl
-python triton_test.py --device cuda --module libdevice
-python triton_test.py --device cuda --module extra
-python triton_test.py --device npu --module tl
-
-# 선택한 연산자 실행
-python triton_test.py --device cuda --module tl --only exp,sum,dot
-python triton_test.py --device npu --module tl --only exp,sum,dot
-python triton_test.py --device cuda --module libdevice --only sin,cos,mul24
-
-# 실행 가능한 모듈 목록 출력
-python triton_test.py --list
+# 선택한 연산자만 실행
+python triton_test.py --device cuda --only exp,sum,dot
+python triton_test.py --device npu --only exp,sum,dot
+python triton_test.py --device cuda --only sin,cos,mul24
 ```
 
 주요 CLI 기본값:
 
 | 옵션 | 기본값 | 의미 |
 |---|---:|---|
-| `--module` | `all` | 요청한 모듈 집합 |
 | `--device` | `auto` | CUDA를 사용할 수 있으면 CUDA, 그렇지 않으면 CPU |
 | `--size` | `1,048,576` | 크기를 설정할 수 있는 1차원 테스트의 길이 |
 | `--block` | `256` | 크기를 설정할 수 있는 1차원 테스트의 block size |
 | `--warmup` | `25` | `triton.testing.do_bench`에서는 밀리초 단위 warmup budget, fallback 및 RBLN timing에서는 launch 횟수 |
 | `--rep` | `100` | `triton.testing.do_bench`에서는 밀리초 단위 측정 budget, fallback 및 RBLN timing에서는 launch 횟수 |
-| `--dtype` | `fp32` | 호환성을 위한 옵션으로, 현재 스위트 전체의 dtype sweep을 강제하지 않음 |
 
 ## PASS, FAIL 및 정확도 검증
 
@@ -166,14 +146,12 @@ abs(actual - expected) <= 1e-2 + 1e-2 * abs(expected)
 - `equal_nan=True`이므로 서로 대응하는 NaN 값은 일치하는 것으로 처리합니다.
 - CUDA extra API는 공통 tensor tolerance 대신 문서화된 launch metadata
   또는 범위/유한성 불변 조건을 사용합니다.
-- 독립적인 기본 CPU/CUDA pytest tensor 비교도 `rtol=1e-2`와
-  `atol=1e-2`를 사용합니다.
 - 의미 있는 숫자 target이 없는 API는 sentinel 또는 불변 조건 검사를
   실행하고 `accuracy=N/A`로 기록합니다.
 
-기본적으로 `FAIL` 또는 `ERROR`가 하나라도 있으면 process는 status 1로
-종료합니다. `--soft-fail-results`를 사용하면 기록된 실패는 유지하면서
-완료된 스위트가 status 0을 반환하도록 할 수 있습니다. 백엔드 설정 실패는
+개별 테스트의 `FAIL`이나 `ERROR`는 exit status를 바꾸지 않습니다.
+스위트가 끝까지 돌면 status 0으로 종료하고, 실패는 보고서에만 기록합니다.
+import, 백엔드 설정, 디바이스 초기화처럼 스위트 자체를 못 돌리는 오류는
 계속 non-zero status를 반환합니다.
 
 ## 성능 측정
@@ -208,30 +186,12 @@ GB/s = bytes moved / elapsed seconds / 1e9
 NPU timing은 `rebel.capture_reports`를 통해 수집한 RBLN
 `total_device` timer를 사용하며, 누적된 microsecond 값을 `rep`으로
 나눕니다. timer를 사용할 수 없거나 값이 유효하지 않으면 스위트는 동기화된
-host wall time을 사용하고 `perf_warning`을 기록합니다. 연산자마다 전송
+host wall time을 사용합니다. 연산자마다 전송
 의미가 다르므로 NPU `GB/s`는 의도적으로 비워 둡니다.
-
-NPU 에너지 측정에는 `rbln-smi --json`을 사용합니다.
-
-1. 안정적인 idle card power baseline을 수집합니다.
-2. 컴파일된 연산을 최소 `--energy-seconds` 동안 반복 호출합니다.
-3. 최근 power sample 3개의 범위가 5% 이내인지 확인합니다.
-4. idle 값을 차감한 dynamic card energy를 다음과 같이 기록합니다.
-
-```text
-mJ/call = (active watts - idle watts) * elapsed seconds / calls * 1000
-```
-
-telemetry를 사용할 수 없거나, 다른 process가 card를 공유하거나, sample이
-안정화되지 않으면 `energy_warning`을 기록하고 에너지 값은 비워 둡니다.
-이는 기능 검증 실패로 처리하지 않습니다. 에너지 측정을 비활성화하려면
-`--energy-seconds 0`을 사용합니다. `device_print`도 에너지 측정을
-건너뛰고 `energy_warning`을 기록합니다.
 
 ## 테스트 데이터 타입과 shape
 
-`--dtype`는 CLI 호환성을 위해 유지되지만 현재 전체 테스트 dtype을
-선택하지는 않습니다. 각 스위트가 연산에 필요한 타입을 선택합니다.
+dtype은 CLI로 고르지 않습니다. 각 스위트가 연산에 필요한 타입을 선택합니다.
 
 | 테스트 범위 | 주요 dtype | 주요 shape | 설정 |
 |---|---|---|---|
@@ -269,52 +229,55 @@ function에는 범위가 제한된 입력을 사용합니다. 정수/bit 연산�
 - 탐색된 API 개수
 - 모듈별 합계
 - `name`, `module`, `dtype`, `exec`, `accuracy`, `ms`,
-  `GB/s`, `mJ/call` 및 `detail`이 포함된 상세 행
+  `GB/s` 및 `detail`이 포함된 상세 행
 - 실패하거나 error가 발생한 테스트의 최종 목록
 
-`--module all` 실행은 다음 파일에 기록합니다.
+보고서는 terminal 출력으로만 남고 파일로 저장하지 않습니다. 남겨 두려면
+직접 리다이렉트합니다.
 
-```text
-reports/report_all_operators.txt
+```bash
+python triton_test.py --device npu | tee report.txt
 ```
 
-다음 CUDA 또는 NPU `--module all` 실행이 기존 파일을 덮어씁니다.
-모듈만 실행하면 terminal에만 출력하고 보고서 파일은 기록하지 않습니다.
-현재 CPU runner는 범위를 `tl`로 정규화하므로 원래 명령에서 기본
-`--module all`을 사용하더라도 CPU 결과는 현재 console에만 출력됩니다.
+CI에서는 job 로그에 그대로 찍힙니다. 리포트를 실패 판정보다 먼저
+출력하므로 테스트가 `FAIL`로 끝나도 로그에 남습니다.
 
 ## 설정
 
 ### 공통 저장소 설정
 
-프로젝트 metadata에는 Python 3.8 이상이 명시되어 있습니다. 현재 RBLN
-compiler wheel과 Docker image는 Python 3.10을 사용합니다.
+프로젝트 스크립트는 Python 3.9 이상을 대상으로 합니다. 현재 RBLN
+compiler wheel과 Docker image는 Python 3.10을 사용합니다. 아래 wheel 설치
+환경도 Python 3.10 이상을 사용하세요. 백엔드별로 별도 가상환경을 권장합니다.
 
 ```bash
 git clone https://github.com/SOTA-PNU/lowlevel-api-test.git
 cd lowlevel-api-test
-git submodule update --init --recursive
 
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install numpy pytest
+python -m pip install numpy
 ```
 
-아래 설명에 따라 백엔드별 PyTorch와 Triton 구현을 설치합니다. 일반
-`requirements.txt`에도 `torch`가 포함되어 있지만 CPU, CUDA 또는
-RBLN에 맞는 build를 선택해 주지는 않습니다. `pip install -r requirements.txt`를
-사용하기 전에 대상 백엔드에 맞는 PyTorch build를 설치해야 합니다. 표준
+아래 설명에 따라 백엔드별 PyTorch와 Triton 구현을 설치합니다. 표준
 업스트림 Triton 설치에는 CPU 또는 RBLN 백엔드가 포함되지 않습니다.
 
 ### CPU 설정
 
-활성 환경에 `triton-lang/triton-cpu`를 설치하거나 build한 다음, CPU
-드라이버를 선택할 수 있는지 확인합니다.
+CPU는 별도 `triton-lang/triton-cpu` 구현이 필요합니다. CUDA용
+`pip install triton`으로는 CPU 백엔드가 설치되지 않습니다.
+[triton-cpu 공식 설치 안내](https://github.com/triton-lang/triton-cpu#getting-started)에
+따라 활성 환경에 설치한 다음, CPU 드라이버를 선택할 수 있는지 확인합니다.
+
+이 프로젝트의 Triton 서브모듈은 제거했습니다. CPU Docker image는 기존처럼
+`triton-cpu` 저장소를 별도로 clone하고 그 저장소 내부의 서브모듈을 초기화한 뒤
+소스 빌드합니다. 테스트 코드만 바뀌면 Docker의 설치 레이어를 재사용합니다.
+CPU도 소스 빌드를 없애려면 호환되는 `triton-cpu` wheel을 별도로 준비해야 합니다.
 
 ```bash
 export TRITON_CPU_BACKEND=1
-python triton_test.py --device cpu --module tl
+python triton_test.py --device cpu
 ```
 
 CPU Docker image를 생성하려면 다음 명령을 사용합니다.
@@ -322,7 +285,7 @@ CPU Docker image를 생성하려면 다음 명령을 사용합니다.
 ```bash
 docker build \
   --build-arg BUILD_MODE=cpu \
-  -t triton-local-build:cpu-latest \
+  -t ghcr.io/sota-pnu/lowlevel-api-test:cpu-latest \
   -f docker/Dockerfile .
 
 DOCKER_IMAGE_TAG=cpu-latest ./docker/run-docker.sh test-cpu
@@ -330,30 +293,37 @@ DOCKER_IMAGE_TAG=cpu-latest ./docker/run-docker.sh test-cpu
 
 ### NVIDIA GPU 설정
 
-NVIDIA 드라이버, 해당 드라이버와 호환되고 CUDA를 지원하는 PyTorch build,
-그리고 업스트림 Triton을 설치합니다. 테스트 전에 런타임을 확인합니다.
+NVIDIA 드라이버와 호환되는 CUDA PyTorch wheel을 먼저 설치한 뒤
+CUDA 의존성을 설치합니다. 아래는 CUDA 12.8 wheel을 사용하는 예시입니다.
+드라이버에 맞는 PyTorch index를 선택하세요.
 
 ```bash
+python -m pip install --only-binary=:all: torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install --only-binary=:all: torch triton numpy
+python -m pip check
+
 nvidia-smi
-python -c "import torch; assert torch.cuda.is_available()"
+python -c "import torch, triton; assert torch.cuda.is_available(); print(triton.__version__, triton.__file__)"
 python triton_test.py --device cuda
 ```
 
-설치된 package 대신 저장소의 Triton submodule을 사용하려면 다음 명령을
-실행합니다.
+[Triton 공식 wheel](https://triton-lang.org/main/getting-started/installation.html)을
+사용하므로 서브모듈 초기화나 Triton 자체의 소스 빌드는 필요하지 않습니다.
+PyTorch가 요구하는 Triton 버전을 유지하도록 별도의 Triton upgrade는 하지 않습니다.
+`--only-binary=:all:`은 호환 wheel이 없으면 소스 빌드 대신 설치 오류를 반환합니다.
+기존 `--local-triton` 옵션은 제거했으므로 실행 명령에서 빼주세요.
+테스트 실행 중 개별 커널의 JIT 컴파일은 계속 수행합니다.
+
+GPU image는 CUDA 12.8 toolkit과 cu128 PyTorch/Triton wheel을 설치합니다
+(`docker/Dockerfile:11`, `:12`).
 
 ```bash
-git submodule update --init --recursive
-python triton_test.py --local-triton --device cuda
-```
+docker build \
+  --build-arg BUILD_MODE=cuda \
+  -t ghcr.io/sota-pnu/lowlevel-api-test:gpu-latest \
+  -f docker/Dockerfile .
 
-설정된 NVIDIA host에서 helper script는 탐색된 디바이스에 따라 CUDA 모드와
-GPU architecture를 선택합니다. 현재 build script는 image에 CUDA 12.8
-toolkit을 사용합니다.
-
-```bash
-./docker/build-docker.sh
-./docker/run-docker.sh test-cuda
+DOCKER_IMAGE_TAG=gpu-latest ./docker/run-docker.sh test-cuda
 ```
 
 ### RBLN NPU 설정
@@ -391,8 +361,7 @@ python -c "from rebel.triton.backends import backends; assert 'rebel' in backend
 
 ```bash
 unset TRITON_BACKENDS_IN_TREE
-PYTHONPATH="" python triton_test.py --device npu --module tl
-PYTHONPATH="" python triton_test.py --device npu --module all
+PYTHONPATH="" python triton_test.py --device npu
 ```
 
 NPU Docker build에서는 인증된 RBLN Python index에 접근할 수 있도록
@@ -402,7 +371,7 @@ BuildKit secret을 제공해야 합니다.
 docker buildx build --load \
   --secret id=rbln_pip_config,src=/path/to/rbln-pip.conf \
   --build-arg BUILD_MODE=npu \
-  -t triton-local-build:npu-latest \
+  -t ghcr.io/sota-pnu/lowlevel-api-test:npu-latest \
   -f docker/Dockerfile .
 
 DOCKER_IMAGE_TAG=npu-latest ./docker/run-docker.sh test-npu

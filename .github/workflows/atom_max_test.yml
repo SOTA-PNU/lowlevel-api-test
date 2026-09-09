@@ -5,12 +5,6 @@ name: Atom Max Test
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      strict_results:
-        description: Fail the job when an individual operator reports FAIL or ERROR
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -54,25 +48,8 @@ jobs:
             "import sys, torch; from importlib.metadata import version; from rebel.triton.backends import backends; print('python', sys.executable); print('torch', torch.__version__); print('rebel-compiler', version('rebel-compiler')); print('backends', sorted(backends)); assert 'rebel' in backends, 'rebel backend is not registered'; assert backends['rebel'].driver.is_active(), 'rebel backend is not active'; print('NPU backend active')"
 
       - name: Run NPU tests
-        id: npu_tests
         shell: bash
-        env:
-          STRICT_RESULTS: ${{ inputs.strict_results }}
         run: |
           set -euo pipefail
-          result_args=()
-          if [ "$STRICT_RESULTS" != "true" ]; then
-            result_args+=(--soft-fail-results)
-          fi
-
           env -u TRITON_BACKENDS_IN_TREE PYTHONPATH="" \
-            "$NPU_PYTHON" triton_test.py --device npu "${result_args[@]}"
-
-      - name: Upload NPU report
-        if: ${{ always() && (steps.npu_tests.outcome == 'success' || steps.npu_tests.outcome == 'failure') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: atom-max-npu-report-${{ github.sha }}
-          path: reports/report_all_operators.txt
-          if-no-files-found: warn
-          retention-days: 14
+            "$NPU_PYTHON" -u triton_test.py --device npu
