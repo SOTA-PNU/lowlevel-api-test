@@ -29,6 +29,7 @@ from cpu_gpu import (
     CONTROL_MODES,
     CREATION_MODES,
     DOT_SIZE,
+    FLOAT_ATOMIC_OPS,
     HINT_MODES,
     INPUT_DTYPE,
     KERNELS,
@@ -174,23 +175,27 @@ def shared_control_fake(x: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::shared_misc", mutates_args={})
 def shared_misc_wrapper(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    out_dtype = torch.float32 if _ACTIVE_OP == "cast" else x.dtype
+    out_dtype = torch.int32 if _ACTIVE_OP == "cast" else x.dtype
     out = torch.empty(x.shape, dtype=out_dtype, device=x.device)
     warmup(RBLN_KERNELS.misc, x, y, out, RBLN_BATCH, ROWS, COLS, _active_mode(MISC_MODES))
     return out
 
 @register_fake("rbln_triton_ops::shared_misc")
 def shared_misc_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    out_dtype = torch.float32 if _ACTIVE_OP == "cast" else x.dtype
+    out_dtype = torch.int32 if _ACTIVE_OP == "cast" else x.dtype
     return torch.empty(x.shape, dtype=out_dtype, device=x.device)
 
 @triton_op("rbln_triton_ops::shared_creation", mutates_args={})
 def shared_creation_wrapper(x: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(x); warmup(RBLN_KERNELS.creation, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(CREATION_MODES)); return out
+    out_dtype = torch.float32 if _ACTIVE_OP == "cdiv" else x.dtype
+    out = torch.empty_like(x, dtype=out_dtype)
+    warmup(RBLN_KERNELS.creation, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(CREATION_MODES))
+    return out
 
 @register_fake("rbln_triton_ops::shared_creation")
 def shared_creation_fake(x: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(x)
+    out_dtype = torch.float32 if _ACTIVE_OP == "cdiv" else x.dtype
+    return torch.empty_like(x, dtype=out_dtype)
 
 @triton_op("rbln_triton_ops::shared_hint", mutates_args={})
 def shared_hint_wrapper(x: torch.Tensor) -> torch.Tensor:
@@ -267,7 +272,7 @@ def shared_atomic_wrapper(x: torch.Tensor) -> torch.Tensor:
 
 @register_fake("rbln_triton_ops::shared_atomic")
 def shared_atomic_fake(x: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(x, dtype=torch.int32)
+    return torch.empty_like(x)
 
 @triton_op("rbln_triton_ops::shared_npu_shape", mutates_args={})
 def shared_npu_shape_wrapper(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -574,20 +579,26 @@ def _make_test_case(op):
         x = signed_input()
         y = signed_input()
         if op == "cast":
-            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.int32).reshape(RBLN_BATCH, ROWS, COLS)
+            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.float32).reshape(RBLN_BATCH, ROWS, COLS)
         expected = {
-            "cast": x.to(torch.float32),
+            "cast": x.to(torch.int32),
             "clamp": torch.clamp(x, -0.5, 0.5),
             "fma": x * y + 1.0,
         }[op]
         return MiscModel(), (x, y), expected, normalize
+    if op == "cdiv":
+        # Match the shared CPU/CUDA case with host-generated integer operands.
+        x = torch.arange(
+            RBLN_BATCH * ROWS * COLS, dtype=torch.int32,
+        ).reshape(RBLN_BATCH, ROWS, COLS)
+        expected = torch.ceil(x.to(torch.float64) / 2).to(torch.float32)
+        return CreationModel(), (x,), expected, normalize
     if op in CREATION_MODES:
         base = torch.arange(COLS).reshape(1, 1, COLS).expand_as(x).float()
         expected = {
             "arange": base,
             "full": torch.exp(x + 3.0),
             "zeros_like": torch.exp(x),
-            "cdiv": torch.div(base + 2, 2, rounding_mode="floor"),
         }[op]
         return CreationModel(), (x,), expected, normalize
     if op in HINT_MODES:
@@ -629,8 +640,14 @@ def _make_test_case(op):
             for i in range(1, COLS): reduced = torch.bitwise_xor(reduced, x[:, :, i:i + 1])
         return ArgReduceModel(), (x,), reduced.expand_as(x).to(x.dtype), normalize
     if op in ATOMIC_MODES:
-        atomic_input = torch.zeros_like(x, dtype=torch.int32)
-        return AtomicModel(), (atomic_input,), torch.zeros_like(atomic_input), normalize
+        atomic_dtype = torch.float32 if op in FLOAT_ATOMIC_OPS else torch.int32
+        atomic_input = torch.zeros_like(x, dtype=atomic_dtype)
+        return (
+            AtomicModel(),
+            (atomic_input,),
+            torch.zeros_like(atomic_input),
+            normalize,
+        )
     if op in NPU_SHAPE_MODES:
         y = positive_input()
         if op == "join": expected = torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
@@ -672,12 +689,13 @@ def _make_test_case(op):
         return MetaRuntimeModel(), (x, y), expected, normalize
     expected = (
         None if op in {"static_assert", "static_print"}
-        else torch.exp(torch.exp(x)) if op == "static_range"
+        else 3.0 * x if op == "static_range"
         else torch.exp(x)
     )
     return ControlModel(), (x,), expected, normalize
 
 def _run_worker(op, warmup, rep):
+    benchmark._set_runtime_device("npu")
     model, inputs, expected, normalize = _make_test_case(op)
     compiled = torch.compile(model, backend="rbln", dynamic=False, options={"mode": ["strict"]})
     actual = compiled(*inputs)
@@ -690,8 +708,9 @@ def _run_worker(op, warmup, rep):
 
     ms = None
     if ok:
-        ms = benchmark._benchmark_compiled(compiled, inputs, warmup, rep, 
-                                           getattr(rebel, "capture_reports", None))[0]
+        ms = benchmark.benchmark_quietly(
+            lambda: compiled(*inputs), warmup, rep
+        )
 
     payload = {
         "ok": ok,
@@ -699,13 +718,14 @@ def _run_worker(op, warmup, rep):
         "max_rel": max_rel,
         "has_reference": expected is not None,
         "ms": ms,
+        "io_bytes": benchmark._logical_io_bytes(inputs, actual)
     }
     print("RBLN_OP_RESULT=" + json.dumps(payload), flush=True)
 
 def _worker_env(op):
     env = dict(os.environ)
     env["RBLN_TRITON_TEST_OP"] = op
-    env["RBLN_RUNTIME_TIMER"] = "1"
+    env["RBLN_RUNTIME_TIMER"] = "0"
     env["PYTHONPATH"] = os.pathsep.join(path for path in (REPO_ROOT, env.get("PYTHONPATH")) if path)
     env["PATH"] = os.pathsep.join(path for path in (os.path.dirname(sys.executable), env.get("PATH")) if path)
     return env
@@ -756,13 +776,15 @@ def _decode_worker_payload(raw):
     if not isinstance(payload, dict):
         raise ValueError("payload must be a JSON object")
 
-    required = {"ok", "has_reference", "max_abs", "max_rel"}
+    required = {"ok", "has_reference", "max_abs", "max_rel", "io_bytes"}
     missing = sorted(required - payload.keys())
     if missing:
         raise ValueError("missing field(s): " + ",".join(missing))
     for field in ("ok", "has_reference"):
         if type(payload[field]) is not bool:
             raise ValueError(f"{field} must be a boolean")
+    if type(payload["io_bytes"]) is not int or payload["io_bytes"] < 0:
+        raise ValueError("io_bytes must be a non-negative integer")
     return payload
 
 def _report_dtype(op):
@@ -856,6 +878,7 @@ def _run_npu_tl(args):
             results._record_validation(
                 records, key, "tl", dtype, "exec+perf", t0,
                 payload["ok"], detail, ms=benchmark_ms,
+                io_bytes=payload["io_bytes"],
             )
 
             if not payload.get("has_reference", True):

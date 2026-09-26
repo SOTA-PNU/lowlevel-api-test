@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, Optional, Tuple
 import torch
-from benchmark import _device_string, benchmark_quietly
+from benchmark import _gbps, _device_string, benchmark_quietly
 
 class TestResult(Enum):
     PASS = "PASS"
@@ -85,7 +85,7 @@ def _module_breakdown(results: Dict[str, TestResultInfo]) -> Dict[str, Dict[str,
         stats[fields[r.result]] += 1
     return modules
 
-def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: str, mode: str, status: TestResult, 
+def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: str, mode: str, status: TestResult,
             start_t: float, ms: Optional[float] = None, gbps: Optional[float] = None, detail: str = ""):
     results[name] = TestResultInfo(
         result=status,
@@ -100,6 +100,8 @@ def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: s
     )
     if status == TestResult.PASS:
         perf = f"{ms} ms" if ms is not None else "-"
+        if gbps is not None:
+            perf += f" | {gbps:.6g} GB/s"
         print(f"✅  {name:42} {dtype:6} {perf}")
     elif status == TestResult.FAIL:
         print(f"❌  {name:42} {dtype:6} {detail}")
@@ -148,12 +150,15 @@ def _report_detail(detail: str) -> str:
     parts = [p for p in parts if p != "ref=cuda_ref"]
     return "; ".join(parts) if parts else detail
 
-def _record_validation(results, name, module, dtype, mode, t0, ok, 
-                       detail, launch=None, warmup=1, rep=1, ms=None):
+def _record_validation(results, name, module, dtype, mode, t0, ok,
+                       detail, launch=None, warmup=1, rep=1, ms=None, io_bytes=None):
     if ok and launch is not None and ms is None:
         ms = benchmark_quietly(launch, warmup, rep)
+    gbps = _gbps(io_bytes, ms) if ok else None
+    if io_bytes is not None:
+        detail += f"; logical_io_bytes={io_bytes}"
     _record(results, name, module, dtype, mode, TestResult.PASS if ok else TestResult.FAIL,
-             t0, ms=ms if ok else None, detail=_validation_detail(ok, detail))
+             t0, ms=ms if ok else None, gbps=gbps, detail=_validation_detail(ok, detail))
 
 def generate_report(results: Dict[str, TestResultInfo], args, triton_module, api) -> str:
     total = len(results)

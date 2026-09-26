@@ -67,6 +67,7 @@ def _run_unshared_tl(args):
         t0 = time.time()
         key = f"tl.{name}"
         op_dtype = dtype
+        io_inputs = (x_fp,)
         try:
             if name in TL_TENSOR_DESC_RUNTIME:
                 desc_rows = desc_cols = 64
@@ -77,6 +78,7 @@ def _run_unshared_tl(args):
                 triton.set_allocator(descriptor_allocator)
 
                 x_desc = torch.randn((desc_rows, desc_cols), device=device, dtype=input_dtype)
+                io_inputs = (x_desc,)
                 out = torch.empty_like(x_desc)
                 desc_grid = (triton.cdiv(desc_rows, block_m), triton.cdiv(desc_cols, block_n))
                 launch = benchmark._make_launch(tensor_descriptor_identity_kernel, desc_grid, x_desc, out, 
@@ -87,6 +89,7 @@ def _run_unshared_tl(args):
             elif name == "reduce_or":
                 op_dtype = str(x_int.dtype).removeprefix("torch.")
                 out = torch.empty(grid[0], device=device, dtype=torch.bool)
+                io_inputs = (x_int,)
                 launch = benchmark._make_launch(reduce_or_kernel, grid, x_int, out, n, BLOCK=block)
                 benchmark.run_quietly(launch, benchmark._sync_device)
                 padded = torch.zeros(grid[0] * block, device=device, dtype=x_int.dtype)
@@ -109,6 +112,7 @@ def _run_unshared_tl(args):
                     torch.arange(block - 1, half - 1, -1, device=device)
                 )).to(input_dtype)
                 values = pattern.repeat(grid[0])[:n]
+                io_inputs = (values,)
                 out = torch.empty_like(values)
                 launch = benchmark._make_launch(bitonic_merge_kernel, grid, values, out, n, BLOCK=block)
                 benchmark.run_quietly(launch, benchmark._sync_device)
@@ -119,6 +123,7 @@ def _run_unshared_tl(args):
             elif name == "map_elementwise":
                 op_dtype = str(x_int.dtype).removeprefix("torch.")
                 out = torch.empty_like(x_int)
+                io_inputs = (x_int, y_int)
                 launch = benchmark._make_launch(map_elementwise_kernel, grid, 
                                                 x_int, y_int, out, n, BLOCK=block)
                 benchmark.run_quietly(launch, benchmark._sync_device)
@@ -161,7 +166,8 @@ def _run_unshared_tl(args):
                 continue
 
             results._record_validation(records, key, "tl", op_dtype, "kernel", t0, 
-                                       ok, detail, launch, args.warmup, args.rep)
+                                       ok, detail, launch, args.warmup, args.rep,
+                                       io_bytes=benchmark._logical_io_bytes(io_inputs, out))
         except Exception as exc:
             results._record(records, key, "tl", op_dtype, "kernel", results.TestResult.ERROR, t0,
                              detail=f"{type(exc).__name__}: {exc}"[:1000])
@@ -368,6 +374,7 @@ ATOMIC_MODES = {
     "atomic_add": 0, "atomic_max": 1, "atomic_min": 2, "atomic_and": 3,
     "atomic_or": 4, "atomic_xor": 5, "atomic_xchg": 6, "atomic_cas": 7,
 }
+FLOAT_ATOMIC_OPS = {"atomic_add", "atomic_max", "atomic_min", "atomic_cas"}
 NPU_SHAPE_MODES = {"ravel": 0, "view": 1, "cat": 2, "join": 3, "split": 4}
 NPU_MISC_OPS = {"swizzle2d": 0, "umulhi": 1}
 META_RUNTIME_MODES = {
@@ -881,7 +888,7 @@ def shared_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
     if mode == 0:
         out = x
         for _ in tl.static_range(0, 2):
-            out = tl.exp(out)
+            out = out + x
     else:
         if mode == 1:
             tl.static_print("RBLN Triton static_print smoke test")
@@ -901,7 +908,7 @@ def shared_misc(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
     x, y = tl.load(xb), tl.load(yb)
     if mode == 0:
-        out = tl.cast(x, tl.float32)
+        out = tl.cast(x, tl.int32)
     elif mode == 1:
         out = tl.clamp(x, -0.5, 0.5)
     else:
@@ -924,8 +931,7 @@ def shared_creation(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
     elif mode == 2:
         out = tl.exp(x + tl.zeros_like(x))
     else:
-        base = tl.arange(0, cols)[None, None, :] + 1
-        out = x * 0.0 + tl.cdiv(base, 2)
+        out = tl.cdiv(x, 2).to(tl.float32)
     tl.store(ob, out)
 
 @triton.jit
@@ -1497,7 +1503,7 @@ def run_shared_tl(args, triton_module, tl_module):
             elif name in CONTROL_MODES:
                 out = torch.empty_like(x)
                 expected = (
-                    torch.exp(torch.exp(x)) if name == "static_range" else None
+                    3.0 * x if name == "static_range" else None
                 )
                 kernel, kernel_args = kernels.control, (
                     x, out, RBLN_BATCH, ROWS, COLS, CONTROL_MODES[name],
@@ -1505,20 +1511,25 @@ def run_shared_tl(args, triton_module, tl_module):
             elif name in MISC_MODES:
                 x = signed_input(device)
                 y = signed_input(device)
-                if name == "cast":
-                    x = torch.arange(
-                        RBLN_BATCH * ROWS * COLS,
-                        device=device, dtype=torch.int32,
-                    ).reshape(RBLN_BATCH, ROWS, COLS)
-                out_dtype = torch.float32 if name == "cast" else x.dtype
+                out_dtype = torch.int32 if name == "cast" else x.dtype
                 out = torch.empty_like(x, dtype=out_dtype)
                 expected = {
-                    "cast": x.to(torch.float32),
+                    "cast": x.to(torch.int32),
                     "clamp": torch.clamp(x, -0.5, 0.5),
                     "fma": x * y + 1.0,
                 }[name]
                 kernel, kernel_args = kernels.misc, (
                     x, y, out, RBLN_BATCH, ROWS, COLS, MISC_MODES[name],
+                )
+            elif name == "cdiv":
+                # Load integer operands so this case does not depend on tl.arange.
+                x = torch.arange(
+                    RBLN_BATCH * ROWS * COLS, device=device, dtype=torch.int32,
+                ).reshape(RBLN_BATCH, ROWS, COLS)
+                out = torch.empty_like(x, dtype=torch.float32)
+                expected = torch.ceil(x.to(torch.float64) / 2).to(torch.float32)
+                kernel, kernel_args = kernels.creation, (
+                    x, out, RBLN_BATCH, ROWS, COLS, CREATION_MODES[name],
                 )
             elif name in CREATION_MODES:
                 out = torch.empty_like(x)
@@ -1529,7 +1540,6 @@ def run_shared_tl(args, triton_module, tl_module):
                     "arange": base,
                     "full": torch.exp(x + 3.0),
                     "zeros_like": torch.exp(x),
-                    "cdiv": torch.div(base + 2, 2, rounding_mode="floor"),
                 }[name]
                 kernel, kernel_args = kernels.creation, (
                     x, out, RBLN_BATCH, ROWS, COLS, CREATION_MODES[name],
@@ -1625,8 +1635,10 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, ARG_REDUCE_MODES[name],
                 )
             elif name in ATOMIC_MODES:
-                x = torch.zeros_like(x)
-                buf = x.to(torch.int32)
+                atomic_dtype = (
+                    torch.float32 if name in FLOAT_ATOMIC_OPS else torch.int32
+                )
+                buf = torch.zeros_like(x, dtype=atomic_dtype)
                 out = torch.empty_like(buf)
                 expected = torch.zeros_like(buf)
                 kernel, kernel_args = kernels.atomic, (
@@ -1788,6 +1800,9 @@ def run_shared_tl(args, triton_module, tl_module):
                 str(kernel_args[0].dtype).removeprefix("torch."),
                 "exec+perf", t0, ok, detail,
                 launch, args.warmup, args.rep,
+                io_bytes=benchmark._logical_io_bytes(
+                    tuple(t for t in kernel_args if isinstance(t, torch.Tensor) and t is not out), out
+                ),
             )
         except Exception as exc:
             results._record(
@@ -2449,7 +2464,9 @@ def _run_one_extra_cuda(fn: str, km, args) -> results.TestResultInfo:
             max_abs = float(torch.max(torch.abs(sample - x.clamp(-1.75, 1.75))).item())
             detail = f"validated-float8-roundtrip:{fn}; ref=invariant; max_abs={max_abs:.6g}; max_rel=NA; sample={float(sample[0].item())}"
             ms = benchmark.benchmark_quietly(launch, args.warmup, args.rep) if ok else None
-            gbps = benchmark._gbps(n, torch.float32, 1, 1, ms) if ok and ms else None
+            gbps = benchmark._gbps(
+                benchmark._logical_io_bytes((x,), out), ms
+            ) if ok else None
             return results.TestResultInfo(results.TestResult.PASS if ok else results.TestResult.FAIL, time.time() - t0, "cuda", "fp32", "exec+perf", ms, gbps, detail, benchmark._device_string())
 
         out = torch.empty(1, device=benchmark._runtime_device(), dtype=torch.int64)

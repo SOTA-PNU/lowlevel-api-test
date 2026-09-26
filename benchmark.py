@@ -145,60 +145,15 @@ def _make_launch(kernel, grid_spec, *kernel_args, **meta):
         kernel[grid_spec](*kernel_args, **meta)
     return launch
 
-def _gbps(n: int, dtype: torch.dtype, inputs: int, outputs: int, ms: float) -> float:
-    byte_width = torch.empty((), dtype=dtype).element_size()
-    return (n * byte_width * (inputs + outputs)) / (ms * 1e-3) / 1e9
+def _gbps(io_bytes, ms):
+    if io_bytes is None or ms is None or not math.isfinite(ms) or ms <= 0:
+        return None
+    return io_bytes / (ms * 1e6)
 
-def _rbln_timer_us(reports, field):
-    values = []
-    for report in reports:
-        if not isinstance(report, dict) or report.get("type") != "timer":
-            continue
-        value = report.get(field)
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value < 0
-        ):
-            raise RuntimeError(
-                f"invalid RBLN timer report field {field!r}: {value!r}"
-            )
-        values.append(float(value))
-    if not values:
-        raise RuntimeError("RBLN runtime emitted no timer reports")
-    return sum(values)
+def _logical_io_bytes(inputs, output):
+    """Full logical input/output tensor sizes, not measured memory traffic.
 
-def _host_wall_benchmark(compiled, inputs, rep):
-    start_ns = time.perf_counter_ns()
-    for _ in range(rep):
-        compiled(*inputs)
-    return (time.perf_counter_ns() - start_ns) / 1_000_000.0 / rep
-
-def _benchmark_compiled(compiled, inputs, warmup, rep, capture_reports):
-    if capture_reports is None:
-        for _ in range(warmup):
-            compiled(*inputs)
-        return (
-            _host_wall_benchmark(compiled, inputs, rep),
-            "host-wall-fallback",
-            "rebel.capture_reports is unavailable",
-        )
-
-    with capture_reports() as _discarded_reports:
-        for _ in range(warmup):
-            compiled(*inputs)
-
-    with capture_reports() as reports:
-        for _ in range(rep):
-            compiled(*inputs)
-
-    try:
-        device_us = _rbln_timer_us(reports, "total_device")
-    except (RuntimeError, TypeError, ValueError) as exc:
-        return (
-            _host_wall_benchmark(compiled, inputs, rep),
-            "host-wall-fallback",
-            f"{type(exc).__name__}: {exc}"[:300],
-        )
-    return device_us / (1_000.0 * rep), "rbln-total-device", None
+    Count each argument once, including aliased arguments; omit internal
+    buffers, repeated accesses, padding and backend-specific transfers.
+    """
+    return sum(t.numel() * t.element_size() for t in (*inputs, output))
