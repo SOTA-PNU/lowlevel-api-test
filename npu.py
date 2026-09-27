@@ -62,6 +62,7 @@ from cpu_gpu import (
     unary_reference,
     validate_meta_symbol,
 )
+import perf
 
 RBLN_KERNELS = KERNELS
 _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
@@ -366,13 +367,52 @@ def shared_tensor_compile_wrapper(x: torch.Tensor) -> torch.Tensor:
 def shared_tensor_compile_fake(x: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(x)
 
+@triton_op("rbln_triton_ops::perf_tiled_unary", mutates_args={})
+def perf_tiled_unary_wrapper(x: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(x)
+    warmup(
+        perf.perf_tiled_unary, x, out, x.shape[0], x.shape[1], x.shape[2],
+        perf.NPU_PERF_BLOCK_ROWS, _active_mode(perf.NPU_UNARY_MODES),
+    )
+    return out
+
+@register_fake("rbln_triton_ops::perf_tiled_unary")
+def perf_tiled_unary_fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+@triton_op("rbln_triton_ops::perf_tiled_add", mutates_args={})
+def perf_tiled_add_wrapper(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(x)
+    warmup(
+        perf.perf_tiled_add, x, y, out, x.shape[0], x.shape[1], x.shape[2],
+        perf.NPU_PERF_BLOCK_ROWS,
+    )
+    return out
+
+@register_fake("rbln_triton_ops::perf_tiled_add")
+def perf_tiled_add_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+@triton_op("rbln_triton_ops::perf_tiled_matmul", mutates_args={})
+def perf_tiled_matmul_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    out = torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=a.dtype, device=a.device)
+    warmup(
+        perf.perf_tiled_matmul, a, b, out, a.shape[0], a.shape[1], a.shape[2], b.shape[2],
+        perf.NPU_MATMUL_BLOCK, perf.NPU_MATMUL_BLOCK,
+    )
+    return out
+
+@register_fake("rbln_triton_ops::perf_tiled_matmul")
+def perf_tiled_matmul_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=a.dtype, device=a.device)
+
 def _selected_ops(only):
     available = tuple(collect_tl_symbols())
     if not only:
         return available
 
     requested = tuple(op.strip() for op in only.split(",") if op.strip())
-    unknown = sorted(set(requested) - set(available))
+    unknown = sorted(set(requested) - set(available) - set(perf.PERF_OPS))
     if unknown:
         raise ValueError("Unsupported rebel.triton.language op(s) requested: "+ ", ".join(unknown))
 
@@ -490,6 +530,27 @@ class ConstCompileModel(torch.nn.Module):
 class TensorCompileModel(torch.nn.Module):
     def forward(self, x):
         return torch.ops.rbln_triton_ops.shared_tensor_compile(x)
+
+class PerfUnaryModel(torch.nn.Module):
+    def forward(self, x):
+        return torch.ops.rbln_triton_ops.perf_tiled_unary(x)
+
+class PerfAddModel(torch.nn.Module):
+    def forward(self, x, y):
+        return torch.ops.rbln_triton_ops.perf_tiled_add(x, y)
+
+class PerfMatmulModel(torch.nn.Module):
+    def forward(self, a, b):
+        return torch.ops.rbln_triton_ops.perf_tiled_matmul(a, b)
+
+def _make_perf_case(op):
+    name = op.removeprefix("perf_")
+    if name == "matmul":
+        inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, batch=True)
+        return PerfMatmulModel(), inputs, expected, (lambda t: t)
+    inputs, expected = perf.make_inputs(name, perf.NPU_PERF_SHAPE)
+    model = PerfAddModel() if name == "add" else PerfUnaryModel()
+    return model, inputs, expected, (lambda t: t)
 
 def _make_test_case(op):
     normalize = (
@@ -691,15 +752,21 @@ def _make_test_case(op):
     )
     return ControlModel(), (x,), expected, normalize
 
+_RESULT_MARKER = "RBLN_OP_RESULT="
+
 def _run_worker(op, warmup, rep):
     benchmark._set_runtime_device("npu")
-    model, inputs, expected, normalize = _make_test_case(op)
+    model, inputs, expected, normalize = (
+        _make_perf_case(op) if op.startswith("perf_") else _make_test_case(op)
+    )
     compiled = torch.compile(model, backend="rbln", dynamic=False, options={"mode": ["strict"]})
     actual = compiled(*inputs)
 
     if expected is None:
         ok = bool(torch.isfinite(actual).all())
         max_abs = max_rel = 0.0
+    elif op.startswith("perf_"):
+        ok, max_abs, max_rel = perf.compare(op.removeprefix("perf_"), actual, expected)
     else:
         ok, max_abs, max_rel = results._compare_tensors(normalize(actual), normalize(expected))
 
@@ -717,7 +784,7 @@ def _run_worker(op, warmup, rep):
         "ms": ms,
         "io_bytes": benchmark._logical_io_bytes(inputs, actual)
     }
-    print("RBLN_OP_RESULT=" + json.dumps(payload), flush=True)
+    print(_RESULT_MARKER + json.dumps(payload), flush=True)
 
 def _worker_env(op):
     env = dict(os.environ)
@@ -764,6 +831,20 @@ def _compiler_error_detail(output, returncode):
         return "RBLN compile error: " + phase.group(1)
 
     return f"RBLN worker failed (exit={returncode}); no structured diagnostic"
+
+def _spawn_worker(op, args, timeout):
+    env = _worker_env(op)
+    with tempfile.TemporaryDirectory(prefix=f"rbln-triton-{op}-") as triton_home:
+        env["TRITON_HOME"] = triton_home
+        return subprocess.run(
+            [sys.executable, "-m", __name__, "--worker", op,
+                "--warmup", str(args.warmup), "--rep", str(args.rep)],
+            capture_output=True, text=True, env=env,
+            cwd=triton_home, timeout=timeout, check=False
+        )
+
+def _worker_result_line(process):
+    return next((line for line in process.stdout.splitlines() if line.startswith(_RESULT_MARKER)), None)
 
 def _decode_worker_payload(raw):
     try:
@@ -822,16 +903,8 @@ def _run_npu_tl(args):
             )
             continue
         # Run op in subprocess
-        process_env = _worker_env(op)
         try:
-            with tempfile.TemporaryDirectory(prefix=f"rbln-triton-{op}-") as triton_home:
-                process_env["TRITON_HOME"] = triton_home
-                process = subprocess.run(
-                    [sys.executable, "-m", __name__, "--worker", op,
-                        "--warmup", str(args.warmup), "--rep", str(args.rep)],
-                    capture_output=True, text=True, env=process_env,
-                    cwd=triton_home, timeout=worker_timeout, check=False
-                )
+            process = _spawn_worker(op, args, worker_timeout)
         except subprocess.TimeoutExpired:
             results._record(
                 records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
@@ -841,11 +914,10 @@ def _run_npu_tl(args):
         # Check fallback 
         output_log = process.stdout + "\n" + process.stderr
         # Check worker payload and record results
-        marker = "RBLN_OP_RESULT="
-        marker_line = next((line for line in process.stdout.splitlines() if line.startswith(marker)), None)
+        marker_line = _worker_result_line(process)
         if process.returncode == 0 and marker_line is not None:
             try:
-                payload = _decode_worker_payload(marker_line[len(marker):])
+                payload = _decode_worker_payload(marker_line[len(_RESULT_MARKER):])
             except ValueError as exc:
                 results._record(
                     records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
@@ -887,6 +959,59 @@ def _run_npu_tl(args):
                 records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
                 detail=detail[:1000]
             )
+
+    return records
+
+def _run_npu_perf(args):
+    records = {}
+    ops = perf.selected_perf_ops(args.only)
+    worker_timeout = 600
+    dtype = perf.PERF_DTYPE_NAME
+    print(
+        f"\n[NPU] performance tests: {len(ops)} ops, shape={perf.shape_str(perf.NPU_PERF_SHAPE)}, "
+        f"matmul MxNxK={perf.shape_str(perf.NPU_MATMUL_SHAPE)} {dtype}",
+        flush=True,
+    )
+
+    for name in ops:
+        t0 = time.time()
+        key = f"perf.{name}"
+        op = f"perf_{name}"
+        try:
+            process = _spawn_worker(op, args, worker_timeout)
+        except subprocess.TimeoutExpired:
+            results._record(
+                records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
+                detail=f"RBLN worker timed out after {worker_timeout}s"
+            )
+            continue
+
+        marker_line = _worker_result_line(process)
+        if process.returncode != 0 or marker_line is None:
+            detail = _compiler_error_detail(process.stdout + "\n" + process.stderr, process.returncode)
+            results._record(
+                records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
+                detail=detail[:1000]
+            )
+            continue
+        try:
+            payload = _decode_worker_payload(marker_line[len(_RESULT_MARKER):])
+        except ValueError as exc:
+            results._record(
+                records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
+                detail=f"invalid RBLN worker payload: {exc}"[:1000],
+            )
+            continue
+
+        shape = perf.NPU_MATMUL_SHAPE if name == "matmul" else perf.NPU_PERF_SHAPE
+        detail = results._format_error_detail(
+            perf.label(name, shape), payload["max_abs"], payload["max_rel"], reference="torch"
+        )
+        results._record_validation(
+            records, key, "perf", dtype, "perf", t0,
+            payload["ok"], detail, ms=payload.get("ms"), io_bytes=payload["io_bytes"],
+            op_count=perf.op_count(name, shape), op_unit=perf.op_unit(),
+        )
 
     return records
 
@@ -946,6 +1071,7 @@ def run(args):
     print(f"Device: {benchmark._device_string()}")
 
     records = _run_npu_tl(args)
+    records.update(_run_npu_perf(args))
 
     api = {
         "tl": len(collect_tl_symbols()),

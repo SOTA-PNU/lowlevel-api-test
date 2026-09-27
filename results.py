@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, Optional, Tuple
 import torch
-from benchmark import _gbps, _device_string, benchmark_quietly
+from benchmark import _gbps, _ops_per_s, _device_string, benchmark_quietly
 
 class TestResult(Enum):
     PASS = "PASS"
@@ -24,6 +24,8 @@ class TestResultInfo:
     device: str = "unknown"
     exec_status: Optional[str] = None
     accuracy_status: Optional[str] = None
+    ops_per_s: Optional[float] = None
+    ops_unit: str = "FLOPS"
 
     def __post_init__(self):
         if self.exec_status is None:
@@ -54,6 +56,15 @@ def _metric(value: Optional[float], digits: Optional[int] = None) -> str:
         return "-"
     return repr(value) if digits is None else f"{value:.{digits}f}"
 
+def _format_rate(value: Optional[float], unit: str) -> str:
+    """Format an operations-per-second value with an SI prefix, e.g. 12.3 TFLOPS."""
+    if value is None:
+        return "-"
+    for scale, prefix in ((1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "K")):
+        if value >= scale:
+            return f"{value / scale:.4g} {prefix}{unit}"
+    return f"{value:.4g} {unit}"
+
 def _print_perf_row(
     name: str,
     r: TestResultInfo,
@@ -63,7 +74,7 @@ def _print_perf_row(
     mode = f" {r.mode:{mode_width}}" if mode_width is not None else ""
     print(
         f"{name:32} {r.result.value:8} {r.dtype:{dtype_width}}{mode} "
-        f"{_metric(r.ms):>10} {_metric(r.gbps, 2):>10}    {r.detail}"
+        f"{_metric(r.ms, 4):>10} {_metric(r.gbps, 2):>10}    {r.detail}"
     )
 
 def _result_counts(results: Dict[str, TestResultInfo]) -> Dict[TestResult, int]:
@@ -86,7 +97,8 @@ def _module_breakdown(results: Dict[str, TestResultInfo]) -> Dict[str, Dict[str,
     return modules
 
 def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: str, mode: str, status: TestResult,
-            start_t: float, ms: Optional[float] = None, gbps: Optional[float] = None, detail: str = ""):
+            start_t: float, ms: Optional[float] = None, gbps: Optional[float] = None, detail: str = "",
+            ops_per_s: Optional[float] = None, ops_unit: str = "FLOPS"):
     results[name] = TestResultInfo(
         result=status,
         execution_time=time.time() - start_t,
@@ -96,12 +108,16 @@ def _record(results: Dict[str, TestResultInfo], name: str, module: str, dtype: s
         ms=ms,
         gbps=gbps,
         detail=detail,
-        device=_device_string()
+        device=_device_string(),
+        ops_per_s=ops_per_s,
+        ops_unit=ops_unit,
     )
     if status == TestResult.PASS:
-        perf = f"{ms} ms" if ms is not None else "-"
+        perf = f"{ms:.4f} ms" if ms is not None else "-"
         if gbps is not None:
             perf += f" | {gbps:.6g} GB/s"
+        if ops_per_s is not None:
+            perf += f" | {_format_rate(ops_per_s, ops_unit)}"
         print(f"✅  {name:42} {dtype:6} {perf}")
     elif status == TestResult.FAIL:
         print(f"❌  {name:42} {dtype:6} {detail}")
@@ -151,14 +167,19 @@ def _report_detail(detail: str) -> str:
     return "; ".join(parts) if parts else detail
 
 def _record_validation(results, name, module, dtype, mode, t0, ok,
-                       detail, launch=None, warmup=1, rep=1, ms=None, io_bytes=None):
+                       detail, launch=None, warmup=1, rep=1, ms=None, io_bytes=None,
+                       op_count=None, op_unit="FLOPS"):
     if ok and launch is not None and ms is None:
         ms = benchmark_quietly(launch, warmup, rep)
     gbps = _gbps(io_bytes, ms) if ok else None
+    ops_per_s = _ops_per_s(op_count, ms) if ok and op_count else None
     if io_bytes is not None:
         detail += f"; logical_io_bytes={io_bytes}"
+    if op_count is not None:
+        detail += f"; logical_ops={op_count}"
     _record(results, name, module, dtype, mode, TestResult.PASS if ok else TestResult.FAIL,
-             t0, ms=ms if ok else None, gbps=gbps, detail=_validation_detail(ok, detail))
+             t0, ms=ms if ok else None, gbps=gbps, detail=_validation_detail(ok, detail),
+             ops_per_s=ops_per_s, ops_unit=op_unit)
 
 def generate_report(results: Dict[str, TestResultInfo], args, triton_module, api) -> str:
     total = len(results)
@@ -243,7 +264,7 @@ def generate_report(results: Dict[str, TestResultInfo], args, triton_module, api
     lines.append("-----------------")
     lines.append(
         f"{'name':42} {'module':10} {'dtype':22} {'exec':7} "
-        f"{'accuracy':8} {'ms':>10} {'GB/s':>10}    "
+        f"{'accuracy':8} {'ms':>10} {'GB/s':>10} {'FLOPS/OPS':>14}    "
         "detail"
     )
     lines.append("-" * 134)
@@ -251,7 +272,8 @@ def generate_report(results: Dict[str, TestResultInfo], args, triton_module, api
         lines.append(
             f"{name:42} {result.module:10} {result.dtype:22} "
             f"{result.exec_status:7} {result.accuracy_status:8} "
-            f"{_metric(result.ms):>10} {_metric(result.gbps, 2):>10} "
+            f"{_metric(result.ms, 4):>10} {_metric(result.gbps, 2):>10} "
+            f"{_format_rate(result.ops_per_s, result.ops_unit):>14} "
             f"{_report_detail(result.detail)}"
         )
 

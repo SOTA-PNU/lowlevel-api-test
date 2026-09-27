@@ -28,7 +28,7 @@ sync_test_sources() {
     echo ">>> Copying current Triton test sources to container..."
 
     local source
-    for source in triton_test.py cpu_gpu.py npu.py results.py benchmark.py; do
+    for source in triton_test.py cpu_gpu.py npu.py results.py benchmark.py perf.py; do
         docker cp "$source" "$CONTAINER_NAME:/workspace/$source"
     done
 }

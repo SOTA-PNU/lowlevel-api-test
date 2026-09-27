@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import torch
 import benchmark
+import perf
 import results
 
 triton = benchmark.triton
@@ -1296,7 +1297,7 @@ def selected_ops(only: str) -> Tuple[str, ...]:
     if not only:
         return supported
     requested = tuple(part.strip() for part in only.split(",") if part.strip())
-    unknown = sorted(set(requested) - set(supported))
+    unknown = sorted(set(requested) - set(supported) - set(perf.PERF_OPS))
     if unknown:
         raise ValueError(f"Unsupported RBLN Triton op selection: {', '.join(unknown)}")
     return tuple(name for name in supported if name in requested)
@@ -1794,7 +1795,7 @@ def run_shared_tl(args, triton_module, tl_module):
 def test_tl_only(args):
     available = tuple(collect_tl_symbols())
     requested = {op.strip() for op in getattr(args, "only", "").split(",") if op.strip()}
-    unknown = sorted(requested - set(available))
+    unknown = sorted(requested - set(available) - set(perf.PERF_OPS))
     if unknown:
         raise ValueError("Unknown triton.language op selection: " + ", ".join(unknown))
     
@@ -2530,6 +2531,7 @@ def run_cpu(args):
     print(f"Device: {benchmark._device_string()}")
 
     records = test_tl_only(args)
+    records.update(perf.run_perf(args))
 
     api = {"tl": len(collect_tl_symbols()), "libdevice": 0, "extra": 0}
 
@@ -2546,6 +2548,7 @@ def run_cuda(args):
     records.update(test_tl_only(args))
     records.update(test_libdevice_only(args))
     records.update(test_extra_only(args))
+    records.update(perf.run_perf(args))
 
     api = collect_api_availability()
 

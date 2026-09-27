@@ -150,6 +150,11 @@ def _gbps(io_bytes, ms):
         return None
     return io_bytes / (ms * 1e6)
 
+def _ops_per_s(op_count, ms):
+    if op_count is None or ms is None or not math.isfinite(ms) or ms <= 0:
+        return None
+    return op_count / (ms * 1e-3)
+
 def _logical_io_bytes(inputs, output):
     """Full logical input/output tensor sizes, not measured memory traffic.
 
