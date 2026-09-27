@@ -56,6 +56,8 @@ def main():
     parser.add_argument("--only", type=str, default="", help="Comma-separated op names. e.g, exp,sum,dot")
     parser.add_argument("--dtypes", type=str, default="",
                         help="Comma-separated dtypes for perf tests and per-dtype tl tests (default: all). e.g, float16,int8")
+    parser.add_argument("--no-dtype-probe", action="store_true",
+                        help="NPU: run every dtype case even if its dtype probe fails.")
     parser.add_argument("--size", type=int, default=1 << 20)
     parser.add_argument("--block", type=int, default=256)
     parser.add_argument("--warmup", type=int, default=25)

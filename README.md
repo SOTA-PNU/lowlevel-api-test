@@ -125,6 +125,13 @@ abs(actual - expected) <= 1e-2 + 1e-2 * abs(expected)
 - 정수 및 Boolean 결과는 torch.equal을 사용하여 정확히 일치하는지 확인합니다.
 - 수치 비교가 가능한 연산은 최대 절대 오차(max_abs)와 최대 상대 오차(max_rel)를 함께 기록합니다.
 - equal_nan=True를 적용하여 동일한 위치에 발생한 NaN은 일치하는 값으로 처리합니다.
+- 누적 연산(`cumsum`, `associative_scan`, `cumprod`)은 반올림 오차가 누적 크기에 비례해
+  커지므로, 위 허용 범위에 원소별로 `log2(n) × eps × scale`을 더합니다. `n`은 누적 길이(64),
+  `eps`는 dtype의 machine epsilon, `scale`은 합이면 `Σ|x|`의 누적값, 곱이면 `|기대값|`입니다.
+  fp32에서는 이 항이 무시할 만큼 작고, fp16/bf16에서 상쇄로 0 근처가 된 부분합이 dtype
+  정밀도 안의 오차로 FAIL되지 않게 합니다.
+- `cumprod` 입력은 크기 0.5~1.5의 부호 있는 값입니다. 64개를 곱해도 fp16 범위를 넘지 않아
+  오버플로 경계가 아니라 정확도를 비교합니다.
 - CUDA extra API와 같이 PyTorch 참조값을 직접 정의하기 어려운 경우에는 반환값의 범위, 유효성 또는 변환 전후의 일관성 등 API 특성에 맞는 조건을 사용하여 검증합니다.
 - 수치적인 정확도 비교가 적용되지 않는 항목은 accuracy=N/A로 기록합니다.
 
@@ -240,6 +247,12 @@ FLOPS = logical ops / elapsed seconds
   때문에 실패하기 때문입니다.
 - `--dtypes float16,int8`처럼 주면 dtype별 테스트를 해당 dtype으로만 실행합니다.
   float32 전용 테스트는 항상 실행됩니다.
+- NPU는 실행 전에 float32가 아닌 dtype마다 block pointer copy 커널을 한 번 컴파일해
+  보는 dtype probe를 실행합니다. probe가 실패한 dtype은 copy조차 컴파일되지 않으므로,
+  그 dtype의 기능·성능 테스트를 하나씩 컴파일하지 않고 `not run: <dtype> dtype probe
+  ... failed: <원인>` detail과 함께 ERROR로 기록합니다. 컴파일러가 해당 dtype을 지원하게
+  되면 probe가 통과해 설정 변경 없이 모든 테스트가 다시 실행됩니다. 전부 실행하려면
+  `--no-dtype-probe`를 줍니다.
 
 그 밖의 테스트는 대부분 `fp32` 입력을 쓰며, 입력 dtype이 다른 테스트는 다음과 같습니다.
 

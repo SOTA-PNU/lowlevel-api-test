@@ -1389,6 +1389,27 @@ def signed_nonzero_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) 
     low = 0.25 if dtype.is_floating_point else 1
     return torch.where(x < 0, x.clamp(max=-low), x.clamp(min=low))
 
+def product_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) -> torch.Tensor:
+    """Signed values of magnitude 0.5-1.5, so a running product over COLS
+    elements stays within the float16 range."""
+    magnitude = torch.rand(_SHAPE, device=device) + 0.5
+    sign = torch.where(torch.rand(_SHAPE, device=device) < 0.5, -1.0, 1.0)
+    return (magnitude * sign).to(dtype)
+
+ACCUMULATING_OPS = {"cumsum", "associative_scan", "cumprod"}
+
+def accumulation_error_bound(name: str, x: torch.Tensor, expected: torch.Tensor) -> Optional[torch.Tensor]:
+    """Extra tolerance for scans at low precision: rounding error grows with
+    the running magnitude, up to about log2(COLS) * eps * scale for a tree
+    scan, where scale is the running sum of |x| (or |product| for cumprod).
+    The fixed 1e-2 tolerance alone fails correct float16 sums near zero after
+    cancellation. For float32 the bound is negligible."""
+    if name not in ACCUMULATING_OPS or not x.is_floating_point():
+        return None
+    xr = reference_input(x)
+    scale = expected.float().abs() if name == "cumprod" else torch.cumsum(xr.abs(), dim=2)
+    return math.ceil(math.log2(COLS)) * torch.finfo(x.dtype).eps * scale
+
 ROUNDING_UNARY = {"ceil", "floor"}
 
 def stepped_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) -> torch.Tensor:
@@ -1622,7 +1643,7 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, RANDOM_MODES[name],
                 )
             elif name in SCAN_MODES:
-                x = signed_input(device, dt)
+                x = product_input(device, dt) if name == "cumprod" else signed_input(device, dt)
                 out = torch.empty_like(x)
                 xr = reference_input(x)
                 if name in {"cumsum", "associative_scan"}:
@@ -1834,7 +1855,11 @@ def run_shared_tl(args, triton_module, tl_module):
                     reference="torch",
                 )
             else:
-                ok, max_abs, max_rel = results._compare_tensors(out, expected)
+                bound = accumulation_error_bound(name, kernel_args[0], expected)
+                ok, max_abs, max_rel = (
+                    results._compare_tensors(out, expected) if bound is None
+                    else results._compare_with_error_bound(out, expected, bound)
+                )
                 detail = results._format_error_detail(
                     f"common-kernel:{name}", max_abs, max_rel,
                     reference="torch",

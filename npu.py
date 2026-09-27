@@ -53,8 +53,10 @@ from cpu_gpu import (
     SUPPORTED_OPS,
     TL_META_COMPILE,
     UNARY_MODES,
+    accumulation_error_bound,
     collect_tl_symbols,
     dot_inputs,
+    product_input,
     positive_input,
     reference_input,
     signed_input,
@@ -542,9 +544,16 @@ class PerfMatmulModel(torch.nn.Module):
     def forward(self, a, b):
         return torch.ops.rbln_triton_ops.perf_tiled_matmul(a, b)
 
+DTYPE_PROBE_OP = "dtype_probe"
+
 def _make_perf_case(op):
     name = op.removeprefix("perf_")
     dtype = perf.torch_dtype(_TEST_DTYPE)
+    if op == DTYPE_PROBE_OP:
+        # Block-pointer copy of one small tile (perf_tiled_unary mode 0, the
+        # default for an op missing from NPU_UNARY_MODES).
+        x = positive_input(dtype=dtype)
+        return PerfUnaryModel(), (x,), x.clone(), (lambda t: t)
     if name == "matmul":
         inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, dtype, batch=True)
         return PerfMatmulModel(), inputs, expected, (lambda t: t)
@@ -670,7 +679,7 @@ def _make_test_case(op):
     if op in RANDOM_MODES:
         return RandomModel(), (x,), None, normalize
     if op in SCAN_MODES:
-        x = signed_input(dtype=dt)
+        x = product_input(dtype=dt) if op == "cumprod" else signed_input(dtype=dt)
         xr = reference_input(x)
         if op in {"cumsum", "associative_scan"}: expected = torch.cumsum(xr, dim=2)
         elif op == "cumprod": expected = torch.cumprod(xr, dim=2)
@@ -758,7 +767,7 @@ _RESULT_MARKER = "RBLN_OP_RESULT="
 def _run_worker(op, warmup, rep):
     benchmark._set_runtime_device("npu")
     model, inputs, expected, normalize = (
-        _make_perf_case(op) if op.startswith("perf_") else _make_test_case(op)
+        _make_perf_case(op) if op.startswith("perf_") or op == DTYPE_PROBE_OP else _make_test_case(op)
     )
     compiled = torch.compile(model, backend="rbln", dynamic=False, options={"mode": ["strict"]})
     actual = compiled(*inputs)
@@ -769,7 +778,11 @@ def _run_worker(op, warmup, rep):
     elif op.startswith("perf_"):
         ok, max_abs, max_rel = perf.compare(op.removeprefix("perf_"), actual, expected)
     else:
-        ok, max_abs, max_rel = results._compare_tensors(normalize(actual), normalize(expected))
+        bound = accumulation_error_bound(op, inputs[0], expected)
+        ok, max_abs, max_rel = (
+            results._compare_tensors(normalize(actual), normalize(expected)) if bound is None
+            else results._compare_with_error_bound(actual, expected, bound)
+        )
 
     ms = None
     if ok:
@@ -894,7 +907,44 @@ def _report_dtype(op):
     except Exception:
         return "-"
 
-def _run_npu_tl(args):
+def _probe_dtypes(args, dtypes):
+    """Compile and run a block-pointer copy once per non-float32 dtype.
+
+    A dtype the compiler cannot even copy fails every test, and each failing
+    test still costs a full compile. Cases of a failed dtype are recorded as
+    ERROR without running them; once a compiler update makes the probe pass,
+    they run again with no configuration change. --no-dtype-probe runs all.
+    Returns {dtype: failure detail} for the dtypes that failed.
+    """
+    dtypes = sorted({d for d in dtypes if d and d != "float32"})
+    if getattr(args, "no_dtype_probe", False) or not dtypes:
+        return {}
+    print(f"\n[NPU] dtype probe (block-pointer copy): {', '.join(dtypes)}", flush=True)
+    quick = argparse.Namespace(warmup=0, rep=1)
+    failed = {}
+    for dtype in dtypes:
+        try:
+            process = _spawn_worker(DTYPE_PROBE_OP, quick, 300, {"RBLN_TEST_DTYPE": dtype})
+        except subprocess.TimeoutExpired:
+            failed[dtype] = "probe timed out after 300s"
+            continue
+        line = _worker_result_line(process)
+        if process.returncode != 0 or line is None:
+            failed[dtype] = _compiler_error_detail(process.stdout + "\n" + process.stderr, process.returncode)
+        else:
+            try:
+                if not _decode_worker_payload(line[len(_RESULT_MARKER):]).get("ok"):
+                    failed[dtype] = "probe copy returned wrong values"
+            except ValueError as exc:
+                failed[dtype] = f"invalid probe payload: {exc}"
+        print(f"  {dtype:14} {'FAIL: ' + failed[dtype] if dtype in failed else 'PASS'}", flush=True)
+    return failed
+
+def _probe_skip_detail(dtype, probe_failures):
+    return f"not run: {dtype} dtype probe (block-pointer copy) failed: {probe_failures[dtype]}"[:1000]
+
+def _run_npu_tl(args, probe_failures=None):
+    probe_failures = probe_failures or {}
     records = {}
     ops = _selected_ops(args.only)
     supported_ops = set(SUPPORTED_OPS)
@@ -923,6 +973,12 @@ def _run_npu_tl(args):
                 records, key, "tl", dtype,
                 "kernel", results.TestResult.ERROR, t0,
                 detail="no RBLN compile/execute kernel adapter is defined",
+            )
+            continue
+        if case_dtype in probe_failures:
+            results._record(
+                records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
+                detail=_probe_skip_detail(case_dtype, probe_failures),
             )
             continue
         # Run op in subprocess
@@ -985,7 +1041,8 @@ def _run_npu_tl(args):
 
     return records
 
-def _run_npu_perf(args):
+def _run_npu_perf(args, probe_failures=None):
+    probe_failures = probe_failures or {}
     records = {}
     cases = perf.selected_perf_cases(args.only, getattr(args, "dtypes", ""))
     worker_timeout = 600
@@ -999,6 +1056,12 @@ def _run_npu_perf(args):
         t0 = time.time()
         key = f"perf.{name}.{dtype}"
         op = f"perf_{name}"
+        if dtype in probe_failures:
+            results._record(
+                records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
+                detail=_probe_skip_detail(dtype, probe_failures),
+            )
+            continue
         try:
             process = _spawn_worker(op, args, worker_timeout, {"RBLN_TEST_DTYPE": dtype})
         except subprocess.TimeoutExpired:
@@ -1092,8 +1155,13 @@ def run(args):
     print(f"Triton: {getattr(rbln_triton, '__version__', 'unknown')}")
     print(f"Device: {benchmark._device_string()}")
 
-    records = _run_npu_tl(args)
-    records.update(_run_npu_perf(args))
+    dtypes = getattr(args, "dtypes", "")
+    tl_dtypes = [d for _, d in tl_cases(_selected_ops(args.only), dtypes)]
+    perf_dtypes = [d for _, d in perf.selected_perf_cases(args.only, dtypes)]
+    probe_failures = _probe_dtypes(args, tl_dtypes + perf_dtypes)
+
+    records = _run_npu_tl(args, probe_failures)
+    records.update(_run_npu_perf(args, probe_failures))
 
     api = {
         "tl": len(collect_tl_symbols()),
