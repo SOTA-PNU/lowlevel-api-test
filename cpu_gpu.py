@@ -687,7 +687,9 @@ def shared_binary(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr
         out = x * y
     else:
         out = tl.div_rn(x, y)
-    tl.store(out_block, out)
+    # Some backends return float32 for low-precision inputs (e.g. bf16
+    # maximum on CUDA); a block-pointer store does not convert.
+    tl.store(out_block, out.to(out_ptr.dtype.element_ty))
 
 @triton.jit
 def shared_where(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, cols: tl.constexpr):
@@ -841,7 +843,9 @@ def shared_dot(a_ptr, b_ptr, out_ptr, batch: tl.constexpr, size: tl.constexpr):
         strides=(size * size, size, 1), offsets=(0, 0, 0),
         block_shape=(batch, size, size), order=(2, 1, 0),
     )
-    tl.store(out_block, tl.dot(tl.load(a_block), tl.load(b_block)))
+    # tl.dot returns float32 (int32 for int8) and a block-pointer store does
+    # not convert, so convert to the output dtype explicitly.
+    tl.store(out_block, tl.dot(tl.load(a_block), tl.load(b_block)).to(out_ptr.dtype.element_ty))
 
 @triton.jit
 def shared_memory(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
@@ -1039,7 +1043,8 @@ def shared_ordering(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                          (batch, rows, cols))
     else:
         out = tl.sort(x, dim=2)
-    tl.store(ob, out)
+    # tl.softmax returns float32 for fp16/bf16; a block-pointer store does not convert.
+    tl.store(ob, out.to(out_ptr.dtype.element_ty))
 
 @triton.jit
 def shared_layout(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
@@ -1320,26 +1325,86 @@ def selected_ops(only: str) -> Tuple[str, ...]:
 
 INPUT_DTYPE = torch.float32
 
-def positive_input(device: str = "cpu") -> torch.Tensor:
-    return (
-        torch.rand((RBLN_BATCH, ROWS, COLS), device=device, dtype=INPUT_DTYPE)
-        + 0.25
-    )
+FLOAT_DTYPES = ("float32", "float16", "bfloat16")
+NUMERIC_DTYPES = FLOAT_DTYPES + ("int32", "int8")
+# Ops whose kernel runs only the op itself run once per dtype and are recorded
+# as tl.<op>.<dtype>; a dtype the backend does not support is an ERROR. Kernels
+# that wrap their result in tl.exp (reduce, shape, memory, ...) stay float32:
+# at other dtypes they would fail on tl.exp, not on the op under test.
+TL_DTYPES = {
+    **{op: FLOAT_DTYPES for op in UNARY_MODES},
+    "abs": NUMERIC_DTYPES,
+    **{op: NUMERIC_DTYPES for op in ("maximum", "minimum", "add", "sub", "mul")},
+    "fdiv": FLOAT_DTYPES,
+    "div_rn": FLOAT_DTYPES,
+    "where": NUMERIC_DTYPES,
+    "dot": FLOAT_DTYPES + ("int8", "float8_e4m3fn"),
+    **{op: FLOAT_DTYPES for op in MISC_MODES},
+    "cumsum": NUMERIC_DTYPES,
+    "associative_scan": NUMERIC_DTYPES,
+    "cumprod": FLOAT_DTYPES,
+    "sort": NUMERIC_DTYPES,
+    "softmax": FLOAT_DTYPES,
+    **{op: NUMERIC_DTYPES for op in LAYOUT_MODES},
+    "argmax": NUMERIC_DTYPES,
+    "argmin": NUMERIC_DTYPES,
+}
+
+def tl_cases(ops, dtypes: str = "") -> Tuple[Tuple[str, Optional[str]], ...]:
+    """(op, dtype) pairs to run; dtype is None for float32-only tests."""
+    wanted = {part.strip() for part in dtypes.split(",") if part.strip()}
+    cases = []
+    for op in ops:
+        if op in TL_DTYPES:
+            cases += [(op, dtype) for dtype in TL_DTYPES[op] if not wanted or dtype in wanted]
+        else:
+            cases.append((op, None))
+    return tuple(cases)
+
+def tl_case_key(op: str, dtype: Optional[str]) -> str:
+    return f"tl.{op}.{dtype}" if dtype else f"tl.{op}"
+
+def reference_input(t: torch.Tensor) -> torch.Tensor:
+    """float32/int64 copy for torch references, so a low-precision reference
+    does not add its own rounding; the comparison casts back to the output dtype."""
+    return t.float() if t.is_floating_point() else t.long()
+
+_SHAPE = (RBLN_BATCH, ROWS, COLS)
+
+def positive_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) -> torch.Tensor:
+    if not dtype.is_floating_point:
+        return torch.randint(1, 11, _SHAPE, device=device, dtype=dtype)
+    return (torch.rand(_SHAPE, device=device) + 0.25).to(dtype)
 
 POSITIVE_ONLY_UNARY = {"log", "log2", "rsqrt", "sqrt", "sqrt_rn"}
 
-def signed_input(device: str = "cpu") -> torch.Tensor:
-    return (torch.rand((RBLN_BATCH, ROWS, COLS), device=device, dtype=INPUT_DTYPE) * 8.0 - 4.0)
+def signed_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) -> torch.Tensor:
+    # Integers stay within +-10 so int8 products do not overflow.
+    if not dtype.is_floating_point:
+        return torch.randint(-10, 11, _SHAPE, device=device, dtype=dtype)
+    return (torch.rand(_SHAPE, device=device) * 8.0 - 4.0).to(dtype)
 
-def signed_nonzero_input(device: str = "cpu") -> torch.Tensor:
-    x = signed_input(device)
-    return torch.where(x < 0, x.clamp(max=-0.25), x.clamp(min=0.25))
+def signed_nonzero_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) -> torch.Tensor:
+    x = signed_input(device, dtype)
+    low = 0.25 if dtype.is_floating_point else 1
+    return torch.where(x < 0, x.clamp(max=-low), x.clamp(min=low))
 
 ROUNDING_UNARY = {"ceil", "floor"}
 
-def stepped_input(device: str = "cpu") -> torch.Tensor:
-    steps = torch.arange(RBLN_BATCH * ROWS * COLS, device=device, dtype=INPUT_DTYPE) % 8
-    return (steps - 4.0 + 0.25).reshape(RBLN_BATCH, ROWS, COLS)
+def stepped_input(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE) -> torch.Tensor:
+    steps = torch.arange(RBLN_BATCH * ROWS * COLS, device=device, dtype=torch.float32) % 8
+    return (steps - 4.0 + 0.25).reshape(_SHAPE).to(dtype)
+
+def dot_inputs(device: str = "cpu", dtype: torch.dtype = INPUT_DTYPE):
+    """a, b and the reference for tl.dot; int8 accumulates to int32 and fp8
+    stores float16 (perf.matmul_out_dtype)."""
+    shape = (RBLN_BATCH, DOT_SIZE, DOT_SIZE)
+    if dtype.is_floating_point:
+        a, b = (torch.randn(shape, device=device).to(dtype) for _ in range(2))
+        return a, b, a.float() @ b.float()
+    a, b = (torch.randint(-8, 8, shape, device=device, dtype=dtype) for _ in range(2))
+    # float64 is exact here, and CUDA has no integer batched matmul.
+    return a, b, (a.double() @ b.double()).to(perf.matmul_out_dtype(dtype))
 
 def swizzle2d_reference(device: str = "cpu") -> torch.Tensor:
     offsets = torch.arange(ROWS * COLS, device=device)
@@ -1371,7 +1436,7 @@ def unary_reference(name: str, x: torch.Tensor) -> torch.Tensor:
         "sqrt": torch.sqrt,
         "sqrt_rn": torch.sqrt,
     }
-    return functions[name](x)
+    return functions[name](reference_input(x))
 
 def run_shared_tl(args, triton_module, tl_module):
     """Run the canonical JIT kernels directly on the active CPU/CUDA backend."""
@@ -1379,14 +1444,15 @@ def run_shared_tl(args, triton_module, tl_module):
     records = {}
     device = benchmark._runtime_device()
     ops = selected_ops(args.only)
-    configured_dtype_label = str(INPUT_DTYPE).removeprefix("torch.")
-    print(f"\n[{device.upper()}] common Triton JIT kernel coverage: {len(ops)} ops")
+    cases = tl_cases(ops, getattr(args, "dtypes", ""))
+    print(f"\n[{device.upper()}] common Triton JIT kernel coverage: {len(ops)} ops, {len(cases)} op/dtype cases")
 
-    for name in ops:
+    for name, dtype_name in cases:
         t0 = time.time()
-        key = f"tl.{name}"
+        key = tl_case_key(name, dtype_name)
+        dt = getattr(torch, dtype_name) if dtype_name else INPUT_DTYPE
         try:
-            x = positive_input(device)
+            x = positive_input(device, dt)
             if name == "tensor":
                 kernel, kernel_args, expected = (
                     kernels.tensor_compile,
@@ -1405,33 +1471,34 @@ def run_shared_tl(args, triton_module, tl_module):
                 )
             elif name in UNARY_MODES:
                 if name in ROUNDING_UNARY:
-                    x = stepped_input(device)
+                    x = stepped_input(device, dt)
                 elif name not in POSITIVE_ONLY_UNARY:
-                    x = signed_input(device)
+                    x = signed_input(device, dt)
                 kernel, kernel_args, expected = (
                     kernels.unary,
                     (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS, UNARY_MODES[name]),
                     unary_reference(name, x),
                 )
             elif name in BINARY_MODES:
-                x = signed_input(device)
-                y = signed_nonzero_input(device)
+                x = signed_input(device, dt)
+                y = signed_nonzero_input(device, dt)
                 out = torch.empty_like(x)
+                xr, yr = reference_input(x), reference_input(y)
                 expected = {
-                    "fdiv": x / y,
-                    "maximum": torch.maximum(x, y),
-                    "minimum": torch.minimum(x, y),
-                    "add": x + y,
-                    "sub": x - y,
-                    "mul": x * y,
-                    "div_rn": x / y,
+                    "fdiv": xr / yr,
+                    "maximum": torch.maximum(xr, yr),
+                    "minimum": torch.minimum(xr, yr),
+                    "add": xr + yr,
+                    "sub": xr - yr,
+                    "mul": xr * yr,
+                    "div_rn": xr / yr,
                 }[name]
                 kernel, kernel_args = kernels.binary, (
                     x, y, out, RBLN_BATCH, ROWS, COLS, BINARY_MODES[name],
                 )
             elif name == "where":
-                x = signed_input(device)
-                y = signed_input(device)
+                x = signed_input(device, dt)
+                y = signed_input(device, dt)
                 out = torch.empty_like(x)
                 kernel, kernel_args, expected = (
                     kernels.where,
@@ -1471,20 +1538,9 @@ def run_shared_tl(args, triton_module, tl_module):
                     expected = x.transpose(1, 2).contiguous()
                 kernel, kernel_args = kernels.shape, (x, out, RBLN_BATCH, ROWS, COLS, mode)
             elif name == "dot":
-                a = torch.randn(
-                    (RBLN_BATCH, DOT_SIZE, DOT_SIZE),
-                    device=device, dtype=x.dtype,
-                )
-                b = torch.randn(
-                    (RBLN_BATCH, DOT_SIZE, DOT_SIZE),
-                    device=device, dtype=x.dtype,
-                )
-                out = torch.empty_like(a)
-                kernel, kernel_args, expected = (
-                    kernels.dot,
-                    (a, b, out, RBLN_BATCH, DOT_SIZE),
-                    a @ b,
-                )
+                a, b, expected = dot_inputs(device, dt)
+                out = torch.empty_like(a, dtype=perf.matmul_out_dtype(dt))
+                kernel, kernel_args = kernels.dot, (a, b, out, RBLN_BATCH, DOT_SIZE)
             elif name in MEMORY_MODES:
                 out = torch.empty_like(x)
                 kernel, kernel_args, expected = (
@@ -1501,14 +1557,15 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, CONTROL_MODES[name],
                 )
             elif name in MISC_MODES:
-                x = signed_input(device)
-                y = signed_input(device)
+                x = signed_input(device, dt)
+                y = signed_input(device, dt)
                 out_dtype = torch.int32 if name == "cast" else x.dtype
                 out = torch.empty_like(x, dtype=out_dtype)
+                xr, yr = reference_input(x), reference_input(y)
                 expected = {
-                    "cast": x.to(torch.int32),
-                    "clamp": torch.clamp(x, -0.5, 0.5),
-                    "fma": x * y + 1.0,
+                    "cast": xr.to(torch.int32),
+                    "clamp": torch.clamp(xr, -0.5, 0.5),
+                    "fma": xr * yr + 1.0,
                 }[name]
                 kernel, kernel_args = kernels.misc, (
                     x, y, out, RBLN_BATCH, ROWS, COLS, MISC_MODES[name],
@@ -1565,30 +1622,32 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS, RANDOM_MODES[name],
                 )
             elif name in SCAN_MODES:
-                x = signed_input(device)
+                x = signed_input(device, dt)
                 out = torch.empty_like(x)
+                xr = reference_input(x)
                 if name in {"cumsum", "associative_scan"}:
-                    expected = torch.cumsum(x, dim=2)
+                    expected = torch.cumsum(xr, dim=2)
                 elif name == "cumprod":
-                    expected = torch.cumprod(x, dim=2)
+                    expected = torch.cumprod(xr, dim=2)
                 else:
-                    expected = x.sum(dim=2, keepdim=True).expand_as(x)
+                    expected = xr.sum(dim=2, keepdim=True).expand_as(xr)
                 kernel, kernel_args = kernels.scan, (
                     x, out, RBLN_BATCH, ROWS, COLS, SCAN_MODES[name],
                 )
             elif name in ORDERING_MODES:
-                x = signed_input(device)
+                x = signed_input(device, dt)
                 batch, rows = RBLN_BATCH, ROWS
                 out = torch.empty_like(x)
+                xr = reference_input(x)
                 expected = (
-                    torch.softmax(x, dim=1) if name == "softmax"
-                    else torch.sort(x, dim=2).values
+                    torch.softmax(xr, dim=1) if name == "softmax"
+                    else torch.sort(xr, dim=2).values
                 )
                 kernel, kernel_args = kernels.ordering, (
                     x, out, batch, rows, COLS, ORDERING_MODES[name],
                 )
             elif name in LAYOUT_MODES:
-                y = positive_input(device)
+                y = positive_input(device, dt)
                 out = torch.empty_like(x)
                 expected = (
                     torch.flip(x, dims=[2]) if name == "flip"
@@ -1600,7 +1659,7 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, y, out, RBLN_BATCH, ROWS, COLS, LAYOUT_MODES[name],
                 )
             elif name in ARG_REDUCE_MODES:
-                x = signed_input(device)
+                x = signed_input(device, dt)
                 if name == "xor_sum":
                     x = torch.randint(
                         0, 1 << 16, x.shape,
@@ -1633,7 +1692,7 @@ def run_shared_tl(args, triton_module, tl_module):
                     buf, out, RBLN_BATCH, ROWS, COLS, ATOMIC_MODES[name],
                 )
             elif name in NPU_SHAPE_MODES:
-                y = positive_input(device)
+                y = positive_input(device, dt)
                 out = torch.empty_like(x)
                 if name == "join":
                     expected = torch.stack(
@@ -1660,7 +1719,7 @@ def run_shared_tl(args, triton_module, tl_module):
                         device=device, dtype=torch.int32,
                     )
                 else:
-                    y = positive_input(device)
+                    y = positive_input(device, dt)
                 out = torch.empty_like(x)
                 if name == "swizzle2d":
                     expected = swizzle2d_reference(device)
@@ -1672,7 +1731,7 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, y, out, RBLN_BATCH, ROWS, COLS, NPU_MISC_OPS[name],
                 )
             elif name in META_RUNTIME_MODES:
-                y = positive_input(device)
+                y = positive_input(device, dt)
                 if name == "PropagateNan":
                     x = x.clone()
                     y = y.clone()
@@ -1791,7 +1850,7 @@ def run_shared_tl(args, triton_module, tl_module):
             )
         except Exception as exc:
             results._record(
-                records, key, "tl", configured_dtype_label,
+                records, key, "tl", str(dt).removeprefix("torch."),
                 "exec", results.TestResult.ERROR, t0,
                 detail=str(exc)[:1000],
             )

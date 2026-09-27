@@ -217,11 +217,31 @@ FLOPS = logical ops / elapsed seconds
 
 ## 테스트 데이터 타입과 shape
 
-데이터 타입은 CLI 옵션으로 지정하지 않습니다. 각 `tl` 테스트가 연산에 맞는
-입력 타입을 코드에서 정합니다.
+기본 입력 shape는 `[1, 64, 64]`입니다. 커널이 해당 연산만 실행하는 `tl` 테스트는
+아래 dtype마다 한 번씩 실행되고 `tl.<op>.<dtype>`(예: `tl.add.int8`)으로 기록됩니다.
 
-대부분의 입력 tensor는 `fp32`이며, 기본 입력 shape는 `[1, 64, 64]`입니다.
-입력 dtype이 다른 테스트는 다음과 같습니다.
+| 연산 | dtype |
+|---|---|
+| 단항 수학(`ceil`, `cos`, `erf`, `exp`, `exp2`, `floor`, `log`, `log2`, `rsqrt`, `sigmoid`, `sin`, `sqrt`, `sqrt_rn`), `fdiv`, `div_rn`, `cast`, `clamp`, `fma`, `cumprod`, `softmax` | float32, float16, bfloat16 |
+| `abs`, `add`, `sub`, `mul`, `maximum`, `minimum`, `where`, `cumsum`, `associative_scan`, `sort`, `flip`, `interleave`, `argmax`, `argmin` | float32, float16, bfloat16, int32, int8 |
+| `dot` | float32, float16, bfloat16, int8, float8_e4m3fn |
+
+- 커널은 입력 dtype 그대로 계산하며, 지원하지 않는 dtype은 다른 dtype으로 바꾸지 않고
+  ERROR로 기록합니다. 참조값은 float32(정수는 int64)로 계산한 뒤 출력 dtype으로 바꿔
+  비교합니다.
+- block pointer 저장은 dtype을 변환하지 않으므로, 연산 결과의 dtype이 출력과 다를 수
+  있는 커널은 저장할 때만 출력 dtype으로 변환합니다. 입력과 계산은 바꾸지 않습니다.
+  - `dot`: `tl.dot`의 결과는 float32(int8은 int32)입니다. 출력은 int8 입력이면 int32,
+    fp8 입력이면 float16, 나머지는 입력과 같은 dtype입니다.
+  - 이항 연산, `softmax`, `sort`: CUDA에서 bf16 `maximum`/`minimum`과 fp16/bf16
+    `softmax`는 float32 결과를 돌려줍니다.
+- 결과를 `tl.exp`로 감싸 저장하는 커널(`max`, `min`, `sum`, shape·memory 연산,
+  `zeros` 등)은 float32만 실행합니다. 다른 dtype에서는 대상 연산이 아니라 `tl.exp`
+  때문에 실패하기 때문입니다.
+- `--dtypes float16,int8`처럼 주면 dtype별 테스트를 해당 dtype으로만 실행합니다.
+  float32 전용 테스트는 항상 실행됩니다.
+
+그 밖의 테스트는 대부분 `fp32` 입력을 쓰며, 입력 dtype이 다른 테스트는 다음과 같습니다.
 
 - `int32`: `cdiv`, `xor_sum`, `umulhi`, `histogram`, `atomic_and`, `atomic_or`,
   `atomic_xor`

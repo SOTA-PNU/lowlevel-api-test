@@ -54,11 +54,15 @@ from cpu_gpu import (
     TL_META_COMPILE,
     UNARY_MODES,
     collect_tl_symbols,
+    dot_inputs,
     positive_input,
+    reference_input,
     signed_input,
     signed_nonzero_input,
     stepped_input,
     swizzle2d_reference,
+    tl_case_key,
+    tl_cases,
     unary_reference,
     validate_meta_symbol,
 )
@@ -66,7 +70,8 @@ import perf
 
 RBLN_KERNELS = KERNELS
 _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
-_PERF_DTYPE = os.environ.get("RBLN_PERF_DTYPE", "float32")
+# dtype of the worker's test case (functional op/dtype cases and perf tests)
+_TEST_DTYPE = os.environ.get("RBLN_TEST_DTYPE", "float32")
 
 def _active_mode(mapping, default=0):
     return mapping.get(_ACTIVE_OP, default)
@@ -141,13 +146,13 @@ def shared_shape_fake(x: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::shared_dot", mutates_args={})
 def shared_dot_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(a)
+    out = torch.empty_like(a, dtype=perf.matmul_out_dtype(a.dtype))
     warmup(RBLN_KERNELS.dot, a, b, out, RBLN_BATCH, DOT_SIZE)
     return out
 
 @register_fake("rbln_triton_ops::shared_dot")
 def shared_dot_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(a)
+    return torch.empty_like(a, dtype=perf.matmul_out_dtype(a.dtype))
 
 @triton_op("rbln_triton_ops::shared_memory", mutates_args={})
 def shared_memory_wrapper(x: torch.Tensor) -> torch.Tensor:
@@ -539,7 +544,7 @@ class PerfMatmulModel(torch.nn.Module):
 
 def _make_perf_case(op):
     name = op.removeprefix("perf_")
-    dtype = perf.torch_dtype(_PERF_DTYPE)
+    dtype = perf.torch_dtype(_TEST_DTYPE)
     if name == "matmul":
         inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, dtype, batch=True)
         return PerfMatmulModel(), inputs, expected, (lambda t: t)
@@ -552,7 +557,8 @@ def _make_test_case(op):
         (lambda t: torch.sort(t.reshape(-1)).values) if op == "cat"
         else (lambda t: t)
     )
-    x = positive_input()
+    dt = perf.torch_dtype(_TEST_DTYPE)
+    x = positive_input(dtype=dt)
     if op == "block_type":
         return BlockTypeModel(), (x,), None, normalize
     if op == "tensor":
@@ -576,26 +582,27 @@ def _make_test_case(op):
         return ZerosModel(), (x,), torch.exp(torch.maximum(x, torch.zeros_like(x))), normalize
     if op in UNARY_MODES:
         if op in ROUNDING_UNARY:
-            x = stepped_input()
+            x = stepped_input(dtype=dt)
         elif op not in POSITIVE_ONLY_UNARY:
-            x = signed_input()
+            x = signed_input(dtype=dt)
         return UnaryModel(), (x,), unary_reference(op, x), normalize
     if op in BINARY_MODES:
-        x = signed_input()
-        y = signed_nonzero_input()
+        x = signed_input(dtype=dt)
+        y = signed_nonzero_input(dtype=dt)
+        xr, yr = reference_input(x), reference_input(y)
         expected = {
-            "fdiv": x / y,
-            "maximum": torch.maximum(x, y),
-            "minimum": torch.minimum(x, y),
-            "add": x + y,
-            "sub": x - y,
-            "mul": x * y,
-            "div_rn": x / y,
+            "fdiv": xr / yr,
+            "maximum": torch.maximum(xr, yr),
+            "minimum": torch.minimum(xr, yr),
+            "add": xr + yr,
+            "sub": xr - yr,
+            "mul": xr * yr,
+            "div_rn": xr / yr,
         }[op]
         return BinaryModel(), (x, y), expected, normalize
     if op == "where":
-        x = signed_input()
-        y = signed_input()
+        x = signed_input(dtype=dt)
+        y = signed_input(dtype=dt)
         return WhereModel(), (x, y), torch.where(x > y, x, y), normalize
     if op in REDUCE_MODES:
         reduced = getattr(torch, op)(x, dim=2, keepdim=True)
@@ -621,20 +628,20 @@ def _make_test_case(op):
             expected = x.transpose(1, 2).contiguous()
         return ShapeModel(), (x,), expected, normalize
     if op == "dot":
-        a = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
-        b = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
-        return DotModel(), (a, b), a @ b, normalize
+        a, b, expected = dot_inputs(dtype=dt)
+        return DotModel(), (a, b), expected, normalize
     if op in MEMORY_MODES:
         return MemoryModel(), (x,), torch.exp(x), normalize
     if op in MISC_MODES:
-        x = signed_input()
-        y = signed_input()
+        x = signed_input(dtype=dt)
+        y = signed_input(dtype=dt)
         if op == "cast":
-            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.float32).reshape(RBLN_BATCH, ROWS, COLS)
+            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.float32).reshape(RBLN_BATCH, ROWS, COLS).to(dt)
+        xr, yr = reference_input(x), reference_input(y)
         expected = {
-            "cast": x.to(torch.int32),
-            "clamp": torch.clamp(x, -0.5, 0.5),
-            "fma": x * y + 1.0,
+            "cast": xr.to(torch.int32),
+            "clamp": torch.clamp(xr, -0.5, 0.5),
+            "fma": xr * yr + 1.0,
         }[op]
         return MiscModel(), (x, y), expected, normalize
     if op == "cdiv":
@@ -663,24 +670,26 @@ def _make_test_case(op):
     if op in RANDOM_MODES:
         return RandomModel(), (x,), None, normalize
     if op in SCAN_MODES:
-        x = signed_input()
-        if op in {"cumsum", "associative_scan"}: expected = torch.cumsum(x, dim=2)
-        elif op == "cumprod": expected = torch.cumprod(x, dim=2)
-        else: expected = x.sum(dim=2, keepdim=True).expand_as(x)
+        x = signed_input(dtype=dt)
+        xr = reference_input(x)
+        if op in {"cumsum", "associative_scan"}: expected = torch.cumsum(xr, dim=2)
+        elif op == "cumprod": expected = torch.cumprod(xr, dim=2)
+        else: expected = xr.sum(dim=2, keepdim=True).expand_as(xr)
         return ScanModel(), (x,), expected, normalize
     if op in ORDERING_MODES:
-        x = signed_input()
+        x = signed_input(dtype=dt)
+        xr = reference_input(x)
         if op == "softmax":
-            expected = torch.softmax(x, dim=1)
+            expected = torch.softmax(xr, dim=1)
         else:
-            expected = torch.sort(x, dim=2).values
+            expected = torch.sort(xr, dim=2).values
         return OrderingModel(), (x,), expected, normalize
     if op in LAYOUT_MODES:
-        y = positive_input()
+        y = positive_input(dtype=dt)
         expected = torch.flip(x, dims=[2]) if op == "flip" else torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
         return LayoutModel(), (x, y), expected, normalize
     if op in ARG_REDUCE_MODES:
-        x = signed_input()
+        x = signed_input(dtype=dt)
         if op == "xor_sum":
             x = torch.randint(0, 1 << 16, x.shape, dtype=torch.int32)
         if op == "argmax": reduced = torch.argmax(x, dim=2, keepdim=True)
@@ -699,7 +708,7 @@ def _make_test_case(op):
             normalize,
         )
     if op in NPU_SHAPE_MODES:
-        y = positive_input()
+        y = positive_input(dtype=dt)
         if op == "join": expected = torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
         elif op == "split": expected = torch.cat((x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 0], x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 1]), dim=2)
         else: expected = x
@@ -710,11 +719,11 @@ def _make_test_case(op):
             y = torch.randint(1 << 29, 1 << 30, x.shape, dtype=torch.int32)
             expected = ((x.to(torch.int64) * y.to(torch.int64)) >> 32).to(torch.int32)
         else:
-            y = positive_input()
+            y = positive_input(dtype=dt)
             expected = swizzle2d_reference()
         return NpuMiscModel(), (x, y), expected, normalize
     if op in META_RUNTIME_MODES:
-        y = positive_input()
+        y = positive_input(dtype=dt)
         if op == "PropagateNan":
             flat_x, flat_y = x.reshape(-1), y.reshape(-1)
             flat_x[0::3] = float("nan")
@@ -890,12 +899,13 @@ def _run_npu_tl(args):
     ops = _selected_ops(args.only)
     supported_ops = set(SUPPORTED_OPS)
     worker_timeout = 300
-    print(f"\n[NPU] rebel.triton.language callable coverage: {len(ops)} ops", flush=True)
+    cases = tl_cases(ops, getattr(args, "dtypes", ""))
+    print(f"\n[NPU] rebel.triton.language callable coverage: {len(ops)} ops, {len(cases)} op/dtype cases", flush=True)
  
-    for op in ops:
+    for op, case_dtype in cases:
         t0 = time.time()
-        key = f"tl.{op}"
-        dtype = _report_dtype(op)
+        key = tl_case_key(op, case_dtype)
+        dtype = case_dtype or _report_dtype(op)
         # Validate meta APIs
         if op in TL_META_COMPILE:
             try:
@@ -917,7 +927,7 @@ def _run_npu_tl(args):
             continue
         # Run op in subprocess
         try:
-            process = _spawn_worker(op, args, worker_timeout)
+            process = _spawn_worker(op, args, worker_timeout, {"RBLN_TEST_DTYPE": case_dtype or "float32"})
         except subprocess.TimeoutExpired:
             results._record(
                 records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
@@ -990,7 +1000,7 @@ def _run_npu_perf(args):
         key = f"perf.{name}.{dtype}"
         op = f"perf_{name}"
         try:
-            process = _spawn_worker(op, args, worker_timeout, {"RBLN_PERF_DTYPE": dtype})
+            process = _spawn_worker(op, args, worker_timeout, {"RBLN_TEST_DTYPE": dtype})
         except subprocess.TimeoutExpired:
             results._record(
                 records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
