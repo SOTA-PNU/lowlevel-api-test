@@ -247,10 +247,17 @@ CI에서는 다음 순서로 결과를 모읍니다.
 1. 각 테스트 job이 `results.json`을 만들고, 요약을 실행 페이지(Job Summary)에 표시한 뒤
    `results-<cpu|gpu|npu>` artifact로 올립니다. Docker 테스트는 `RESULTS_JSON` 환경 변수로
    `docker/run-docker.sh`가 컨테이너 안의 JSON을 꺼내 옵니다.
-2. `Publish Results` 워크플로가 테스트 워크플로 완료 시 실행되어, 브랜치별 최신 실행의
-   artifact를 내려받아 대시보드를 만듭니다.
-3. `main`의 결과만 `results` 브랜치(`data/<하드웨어>/<실행 번호>.json`)에 누적하고 GitHub Pages에
-   배포합니다. 다른 브랜치는 `dashboard-<브랜치>` artifact로 미리보기만 만듭니다.
+2. 테스트 워크플로 마지막의 `Publish results` job(`publish_results.yml`)이 그 실행의 결과를
+   `gh-pages` 브랜치에 누적하고 대시보드를 다시 만듭니다. GitHub Pages는 `gh-pages` 브랜치를 그대로 게시합니다.
+3. 브랜치를 삭제하면 `pages_cleanup.yml`이 해당 브랜치의 대시보드를 지웁니다.
+
+| 브랜치 | 대시보드 | 결과 데이터 |
+|---|---|---|
+| `main` | https://sota.pusan.ac.kr/lowlevel-api-test/ | `data/<하드웨어>/<실행 번호>.json` |
+| 그 밖의 브랜치 | `https://sota.pusan.ac.kr/lowlevel-api-test/branches/<브랜치>/` | `branches/<브랜치>/data/…` |
+
+브랜치 이름의 `/` 같은 문자는 `-`로 바뀝니다(예: `CI/CD-test` → `CI-CD-test`).
+브랜치 목록은 https://sota.pusan.ac.kr/lowlevel-api-test/branches/ 에 있습니다.
 
 ## 설정
 

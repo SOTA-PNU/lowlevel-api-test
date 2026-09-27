@@ -1,0 +1,46 @@
+name: Remove Branch Dashboard
+
+"on":
+  delete:
+
+permissions:
+  contents: write
+
+jobs:
+  remove:
+    name: Remove branch dashboard
+    if: ${{ github.event.ref_type == 'branch' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Remove from gh-pages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if ! git ls-remote --exit-code --heads "$remote" gh-pages >/dev/null; then
+            echo "No gh-pages branch; nothing to remove."
+            exit 0
+          fi
+          git clone --quiet --depth 1 --branch gh-pages --single-branch "$remote" site
+          python3 report/publish.py --site site --branch "$BRANCH" --default-branch "$DEFAULT_BRANCH" --remove
+          git -C site add -A
+          if git -C site diff --cached --quiet; then
+            echo "No dashboard for $BRANCH"
+            exit 0
+          fi
+          git -C site -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "Remove ${BRANCH} dashboard"
+          git -C site push --quiet origin gh-pages

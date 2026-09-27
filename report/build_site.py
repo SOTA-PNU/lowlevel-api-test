@@ -7,6 +7,7 @@ feeds the status, performance and functional sections; all reports feed the
 performance trends. Standard library only.
 """
 import argparse
+import html
 import json
 import pathlib
 from datetime import datetime, timezone
@@ -49,7 +50,7 @@ def history_entry(report):
         },
     }
 
-def build_payload(reports):
+def build_payload(reports, site=None):
     by_hw = {}
     for report in reports:
         by_hw.setdefault(report["hardware"]["id"], []).append(report)
@@ -68,7 +69,11 @@ def build_payload(reports):
             "history": [history_entry(r) for r in ordered],
         })
     hardware.sort(key=lambda h: (BACKEND_ORDER.get(h["hardware"]["backend"], 9), h["hardware"]["id"]))
-    return {"built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "hardware": hardware}
+    return {
+        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "site": site,
+        "hardware": hardware,
+    }
 
 TEMPLATE = r"""<title>Triton 연산자 테스트 보드</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -281,7 +286,10 @@ footer { font-size: 12px; color: var(--muted); }
       <h1>Triton 연산자 테스트 보드</h1>
       <p>CPU, GPU, NPU에서 Triton 연산자의 실행·정확도(기능 테스트)와 처리량(성능 테스트)을 GitHub Actions로 측정한 결과입니다.</p>
     </div>
-    <div class="meta-line" id="built"></div>
+    <div class="meta-line">
+      <div id="built"></div>
+      <nav id="nav" aria-label="대시보드 이동"></nav>
+    </div>
   </header>
 
   <section aria-labelledby="h-status">
@@ -400,6 +408,11 @@ const metricFor = (key, op) => METRIC[key === "primary" ? PRIMARY(op) : key];
 
 document.getElementById("built").innerHTML =
   `페이지 생성 ${esc(fmtDate(DATA.built_at))} · 하드웨어 ${HW.length}종`;
+if (DATA.site) {
+  const root = DATA.site.root.replace(/\/?$/, "/");
+  document.getElementById("nav").innerHTML =
+    `브랜치 <span class="mono">${esc(DATA.site.branch)}</span> · <a href="${esc(root)}">main 대시보드</a> · <a href="${esc(root)}branches/">브랜치 목록</a>`;
+}
 
 // Hardware cards
 document.getElementById("hw-cards").innerHTML = HW.map((h, i) => {
@@ -580,29 +593,75 @@ document.getElementById("footer").innerHTML =
 </script>
 """
 
+INDEX_BODY = r"""
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">SOTA-PNU / lowlevel-api-test</div>
+      <h1>브랜치별 테스트 보드</h1>
+      <p>브랜치마다 가장 최근 CI 실행 결과로 만든 대시보드입니다. <a href="../">main 대시보드</a>가 기준 결과입니다.</p>
+    </div>
+  </header>
+  <section>
+    <div class="panel"><div class="scroll"><table>
+      <thead><tr><th>브랜치</th><th>하드웨어</th><th>최근 커밋</th><th>페이지 생성</th></tr></thead>
+      <tbody>__ROWS__</tbody>
+    </table></div></div>
+  </section>
+</div>
+"""
+
+def _wrap_page(page):
+    head, body = page.split('\n<div class="wrap">', 1)
+    return ('<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
+            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
+            f'{head}\n</head>\n<body>\n<div class="wrap">{body}\n</body>\n</html>\n')
+
+def write_dashboard(data_dir, out_dir, site=None, fragment=False):
+    payload = build_payload(load_reports(data_dir), site)
+    if not payload["hardware"]:
+        raise SystemExit(f"no reports found under {data_dir}")
+    out = pathlib.Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    page = TEMPLATE.replace("__DATA__", data)
+    (out / "index.html").write_text(page if fragment else _wrap_page(page))
+    (out / "data.json").write_text(json.dumps(payload, ensure_ascii=False))
+    names = ", ".join(h["hardware"]["name"] for h in payload["hardware"])
+    print(f"wrote {out / 'index.html'} ({len(payload['hardware'])} hardware: {names})")
+    return payload
+
+def write_branch_index(branches_dir):
+    """List every branches/<slug>/data.json dashboard in branches/index.html."""
+    branches_dir = pathlib.Path(branches_dir)
+    rows = []
+    for data_path in sorted(branches_dir.glob("*/data.json")):
+        payload = json.loads(data_path.read_text())
+        site = payload.get("site") or {}
+        runs = [h["latest"]["run"] for h in payload["hardware"]]
+        latest = max(runs, key=lambda r: r.get("run_id") or "", default={})
+        sha = latest.get("sha") or ""
+        commit = (f'<a class="mono" href="https://github.com/{html.escape(latest["repository"])}/commit/{html.escape(sha)}">{html.escape(sha[:7])}</a>'
+                  if sha and latest.get("repository") else "–")
+        hardware = ", ".join(html.escape(h["hardware"]["name"]) for h in payload["hardware"])
+        rows.append(
+            f'<tr><td><a class="mono" href="{html.escape(data_path.parent.name)}/">{html.escape(site.get("branch", data_path.parent.name))}</a></td>'
+            f'<td>{hardware}</td><td>{commit}</td><td class="num">{html.escape(payload["built_at"])}</td></tr>'
+        )
+    body = "".join(rows) or '<tr><td colspan="4" class="muted">게시된 브랜치가 없습니다.</td></tr>'
+    head = TEMPLATE.split('\n<div class="wrap">', 1)[0].replace(
+        "<title>Triton 연산자 테스트 보드</title>", "<title>Triton 테스트 브랜치 목록</title>")
+    branches_dir.mkdir(parents=True, exist_ok=True)
+    (branches_dir / "index.html").write_text(_wrap_page(head + INDEX_BODY.replace("__ROWS__", body)))
+    print(f"wrote {branches_dir / 'index.html'} ({len(rows)} branches)")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data", required=True, help="Directory searched recursively for *.json reports")
     parser.add_argument("--out", required=True, help="Output directory for index.html and data.json")
     parser.add_argument("--fragment", action="store_true", help="Write the page body only (no <html> skeleton)")
     args = parser.parse_args()
-
-    payload = build_payload(load_reports(args.data))
-    if not payload["hardware"]:
-        raise SystemExit(f"no reports found under {args.data}")
-    out = pathlib.Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    page = TEMPLATE.replace("__DATA__", data)
-    if not args.fragment:
-        head, body = page.split('\n<div class="wrap">', 1)
-        page = ('<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
-                '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
-                f'{head}\n</head>\n<body>\n<div class="wrap">{body}\n</body>\n</html>\n')
-    (out / "index.html").write_text(page)
-    (out / "data.json").write_text(json.dumps(payload, ensure_ascii=False))
-    names = ", ".join(h["hardware"]["name"] for h in payload["hardware"])
-    print(f"wrote {out / 'index.html'} ({len(payload['hardware'])} hardware: {names})")
+    write_dashboard(args.data, args.out, fragment=args.fragment)
 
 if __name__ == "__main__":
     main()
