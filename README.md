@@ -212,9 +212,6 @@ FLOPS = logical ops / elapsed seconds
 
 shape가 다른 공통 테스트는 다음과 같습니다.
 
-- `expand_dims`, `permute`, `trans`: `[64, 64]`
-- `softmax`: `[64, 1, 64]`
-- `advance`: `[1, 64, 128]`
 - `dot_scaled`: 입력 `[16, 64]`, `[64, 16]`, scale `[16, 2]`, 출력 `[16, 16]`
 
 ## 결과 기록

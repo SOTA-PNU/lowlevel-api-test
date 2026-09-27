@@ -126,12 +126,7 @@ def shared_zeros_fake(x: torch.Tensor) -> torch.Tensor:
     return torch.empty_like(x)
 
 def _shape_for_active_op():
-    mode = _active_mode(SHAPE_MODES)
-    if mode in (0, 1, 3):
-        return (RBLN_BATCH, ROWS, COLS)
-    if mode == 2:
-        return (ROWS, COLS)
-    return (COLS, ROWS)
+    return (RBLN_BATCH, ROWS, COLS)
 
 @triton_op("rbln_triton_ops::shared_shape", mutates_args={})
 def shared_shape_wrapper(x: torch.Tensor) -> torch.Tensor:
@@ -156,8 +151,7 @@ def shared_dot_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 @triton_op("rbln_triton_ops::shared_memory", mutates_args={})
 def shared_memory_wrapper(x: torch.Tensor) -> torch.Tensor:
     out = torch.empty_like(x)
-    memory_cols = COLS * 2 if _ACTIVE_OP == "advance" else COLS
-    warmup(RBLN_KERNELS.memory, x, out, RBLN_BATCH, ROWS, memory_cols, _active_mode(MEMORY_MODES))
+    warmup(RBLN_KERNELS.memory, x, out, RBLN_BATCH, ROWS, COLS, _active_mode(MEMORY_MODES))
     return out
 
 @register_fake("rbln_triton_ops::shared_memory")
@@ -241,8 +235,7 @@ def shared_scan_fake(x: torch.Tensor) -> torch.Tensor:
 @triton_op("rbln_triton_ops::shared_ordering", mutates_args={})
 def shared_ordering_wrapper(x: torch.Tensor) -> torch.Tensor:
     out = torch.empty_like(x)
-    batch, rows = ((ROWS, RBLN_BATCH)
-                   if _ACTIVE_OP == "softmax" else (RBLN_BATCH, ROWS))
+    batch, rows = RBLN_BATCH, ROWS
     warmup(RBLN_KERNELS.ordering, x, out, batch, rows, COLS,
                  _active_mode(ORDERING_MODES))
     return out
@@ -617,21 +610,19 @@ def _make_test_case(op):
         if op in {"broadcast", "broadcast_to"}:
             expected = torch.exp(x - x.sum(dim=2, keepdim=True))
         elif op == "expand_dims":
-            x = x[0].contiguous()
             expected = torch.exp(x)
         elif op == "reshape":
             expected = torch.exp(x)
+        elif op == "permute":
+            expected = x.permute(0, 2, 1).contiguous()
         else:
-            x = x[0].contiguous()
-            expected = x.t().contiguous()
+            expected = x.transpose(1, 2).contiguous()
         return ShapeModel(), (x,), expected, normalize
     if op == "dot":
         a = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
         b = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
         return DotModel(), (a, b), a @ b, normalize
     if op in MEMORY_MODES:
-        if op == "advance":
-            x = torch.rand((RBLN_BATCH, ROWS, COLS * 2), dtype=x.dtype) + 0.25
         return MemoryModel(), (x,), torch.exp(x), normalize
     if op in MISC_MODES:
         x = signed_input()
@@ -678,8 +669,7 @@ def _make_test_case(op):
     if op in ORDERING_MODES:
         x = signed_input()
         if op == "softmax":
-            x = x.reshape(ROWS, RBLN_BATCH, COLS)
-            expected = torch.softmax(x, dim=0)
+            expected = torch.softmax(x, dim=1)
         else:
             expected = torch.sort(x, dim=2).values
         return OrderingModel(), (x,), expected, normalize

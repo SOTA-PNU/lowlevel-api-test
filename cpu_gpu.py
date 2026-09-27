@@ -767,16 +767,18 @@ def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         tl.store(out_block, tl.exp(x - out))
     elif mode == 2:
         x_block = tl.make_block_ptr(
-            base=x_ptr, shape=(rows, cols), strides=(cols, 1),
-            offsets=(0, 0), block_shape=(rows, cols), order=(1, 0),
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
         )
         out_block = tl.make_block_ptr(
-            base=out_ptr, shape=(rows, cols), strides=(cols, 1),
-            offsets=(0, 0), block_shape=(rows, cols), order=(1, 0),
+            base=out_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
         )
         x = tl.load(x_block)
         expanded = tl.expand_dims(x, axis=0)
-        out = tl.reshape(expanded, (rows, cols))
+        out = tl.reshape(expanded, (batch, rows, cols))
         tl.store(out_block, tl.exp(out))
     elif mode == 3:
         x_block = tl.make_block_ptr(
@@ -793,20 +795,33 @@ def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         flat = tl.reshape(x, (rows, cols))
         out = tl.reshape(flat, (batch, rows, cols))
         tl.store(out_block, tl.exp(out))
-    else:
+    elif mode == 4:
         x_block = tl.make_block_ptr(
-            base=x_ptr, shape=(rows, cols), strides=(cols, 1),
-            offsets=(0, 0), block_shape=(rows, cols), order=(1, 0),
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
         )
         out_block = tl.make_block_ptr(
-            base=out_ptr, shape=(cols, rows), strides=(rows, 1),
-            offsets=(0, 0), block_shape=(cols, rows), order=(1, 0),
+            base=out_ptr, shape=(batch, cols, rows),
+            strides=(cols * rows, rows, 1), offsets=(0, 0, 0),
+            block_shape=(batch, cols, rows), order=(2, 1, 0),
         )
         x = tl.load(x_block)
-        if mode == 4:
-            out = tl.permute(x, (1, 0))
-        else:
-            out = tl.trans(x)
+        tl.store(out_block, tl.permute(x, (0, 2, 1)))
+    else:
+        x_block = tl.make_block_ptr(
+            base=x_ptr, shape=(batch, rows, cols),
+            strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
+            block_shape=(batch, rows, cols), order=(2, 1, 0),
+        )
+        out_block = tl.make_block_ptr(
+            base=out_ptr, shape=(batch, cols, rows),
+            strides=(cols * rows, rows, 1), offsets=(0, 0, 0),
+            block_shape=(batch, cols, rows), order=(2, 1, 0),
+        )
+        x = tl.load(x_block)
+        flat = tl.reshape(x, (rows, cols))
+        out = tl.reshape(tl.trans(flat), (batch, cols, rows))
         tl.store(out_block, out)
 
 @triton.jit
@@ -832,20 +847,20 @@ def shared_dot(a_ptr, b_ptr, out_ptr, batch: tl.constexpr, size: tl.constexpr):
 def shared_memory(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
                   cols: tl.constexpr, mode: tl.constexpr):
     if mode == 3:
-        half: tl.constexpr = cols // 2
+        half: tl.constexpr = rows // 2
         x_block = tl.make_block_ptr(
             base=x_ptr, shape=(batch, rows, cols),
             strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
-            block_shape=(batch, rows, half), order=(2, 1, 0),
+            block_shape=(batch, half, cols), order=(2, 1, 0),
         )
         out_block = tl.make_block_ptr(
             base=out_ptr, shape=(batch, rows, cols),
             strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
-            block_shape=(batch, rows, half), order=(2, 1, 0),
+            block_shape=(batch, half, cols), order=(2, 1, 0),
         )
         tl.store(out_block, tl.exp(tl.load(x_block)))
-        x_block = tl.advance(x_block, (0, 0, half))
-        out_block = tl.advance(out_block, (0, 0, half))
+        x_block = tl.advance(x_block, (0, half, 0))
+        out_block = tl.advance(out_block, (0, half, 0))
         tl.store(out_block, tl.exp(tl.load(x_block)))
     else:
         x_block = tl.make_block_ptr(
@@ -1020,7 +1035,8 @@ def shared_ordering(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
     x = tl.load(xb)
     if mode == 0:
-        out = tl.softmax(x)
+        out = tl.reshape(tl.softmax(tl.reshape(x, (rows, batch, cols))),
+                         (batch, rows, cols))
     else:
         out = tl.sort(x, dim=2)
     tl.store(ob, out)
@@ -1442,18 +1458,17 @@ def run_shared_tl(args, triton_module, tl_module):
                     out = torch.empty_like(x)
                     expected = torch.exp(x - x.sum(dim=2, keepdim=True))
                 elif name == "expand_dims":
-                    x = positive_input(device)[0].contiguous()
                     out = torch.empty_like(x)
                     expected = torch.exp(x)
                 elif name == "reshape":
                     out = torch.empty_like(x)
                     expected = torch.exp(x)
+                elif name == "permute":
+                    out = torch.empty((RBLN_BATCH, COLS, ROWS), device=device, dtype=x.dtype)
+                    expected = x.permute(0, 2, 1).contiguous()
                 else:
-                    x = positive_input(device)[0].contiguous()
-                    out = torch.empty(
-                        (COLS, ROWS), device=device, dtype=x.dtype
-                    )
-                    expected = x.t().contiguous()
+                    out = torch.empty((RBLN_BATCH, COLS, ROWS), device=device, dtype=x.dtype)
+                    expected = x.transpose(1, 2).contiguous()
                 kernel, kernel_args = kernels.shape, (x, out, RBLN_BATCH, ROWS, COLS, mode)
             elif name == "dot":
                 a = torch.randn(
@@ -1471,12 +1486,6 @@ def run_shared_tl(args, triton_module, tl_module):
                     a @ b,
                 )
             elif name in MEMORY_MODES:
-                if name == "advance":
-                    x = torch.rand(
-                        (RBLN_BATCH, ROWS, COLS * 2),
-                        device=device,
-                        dtype=x.dtype,
-                    ) + 0.25
                 out = torch.empty_like(x)
                 kernel, kernel_args, expected = (
                     kernels.memory,
@@ -1569,14 +1578,10 @@ def run_shared_tl(args, triton_module, tl_module):
                 )
             elif name in ORDERING_MODES:
                 x = signed_input(device)
-                if name == "softmax":
-                    x = x.reshape(ROWS, RBLN_BATCH, COLS)
-                    batch, rows = ROWS, RBLN_BATCH
-                else:
-                    batch, rows = RBLN_BATCH, ROWS
+                batch, rows = RBLN_BATCH, ROWS
                 out = torch.empty_like(x)
                 expected = (
-                    torch.softmax(x, dim=0) if name == "softmax"
+                    torch.softmax(x, dim=1) if name == "softmax"
                     else torch.sort(x, dim=2).values
                 )
                 kernel, kernel_args = kernels.ordering, (
