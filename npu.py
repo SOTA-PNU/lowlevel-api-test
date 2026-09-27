@@ -66,6 +66,7 @@ import perf
 
 RBLN_KERNELS = KERNELS
 _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
+_PERF_DTYPE = os.environ.get("RBLN_PERF_DTYPE", "float32")
 
 def _active_mode(mapping, default=0):
     return mapping.get(_ACTIVE_OP, default)
@@ -388,7 +389,7 @@ def perf_tiled_add_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::perf_tiled_matmul", mutates_args={})
 def perf_tiled_matmul_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    out = torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=a.dtype, device=a.device)
+    out = torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=perf.matmul_out_dtype(a.dtype), device=a.device)
     warmup(
         perf.perf_tiled_matmul, a, b, out, a.shape[0], a.shape[1], a.shape[2], b.shape[2],
         perf.NPU_MATMUL_BLOCK, perf.NPU_MATMUL_BLOCK,
@@ -397,7 +398,7 @@ def perf_tiled_matmul_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 @register_fake("rbln_triton_ops::perf_tiled_matmul")
 def perf_tiled_matmul_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=a.dtype, device=a.device)
+    return torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=perf.matmul_out_dtype(a.dtype), device=a.device)
 
 def _selected_ops(only):
     available = tuple(collect_tl_symbols())
@@ -538,10 +539,11 @@ class PerfMatmulModel(torch.nn.Module):
 
 def _make_perf_case(op):
     name = op.removeprefix("perf_")
+    dtype = perf.torch_dtype(_PERF_DTYPE)
     if name == "matmul":
-        inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, batch=True)
+        inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, dtype, batch=True)
         return PerfMatmulModel(), inputs, expected, (lambda t: t)
-    inputs, expected = perf.make_inputs(name, perf.NPU_PERF_SHAPE)
+    inputs, expected = perf.make_inputs(name, perf.NPU_PERF_SHAPE, dtype)
     model = PerfAddModel() if name == "add" else PerfUnaryModel()
     return model, inputs, expected, (lambda t: t)
 
@@ -797,14 +799,34 @@ _DIAGNOSTICS = (
     (r"RBLNRuntimeError:\s*([^\n]+)", "RBLN model compiler error: {}"),
 )
 
+def _compilation_error_detail(clean):
+    """A Triton CompilationError prints its location, the kernel source up to
+    a caret line and, when there is one, the cause after it."""
+    match = re.search(r"CompilationError: (at \d+:\d+:)\n(.*?)(?:\n\s*\n|\Z)", clean, re.S)
+    if not match:
+        return None
+    lines = match.group(2).splitlines()
+    caret = next((i for i, line in enumerate(lines) if line.strip() and not line.strip().strip("^")), None)
+    if caret is None:
+        return None
+    code = lines[caret - 1].strip() if caret else ""
+    cause = " ".join(line.strip() for line in lines[caret + 1:] if line.strip())
+    return f"Triton compilation error: {match.group(1)} {code}" + (f" -> {cause}" if cause else "")
+
 def _compiler_error_detail(output, returncode):
     if returncode < 0:
         signal = {6: "SIGABRT", 11: "SIGSEGV"}.get(
             -returncode, f"signal {-returncode}"
         )
-        return f"RBLN compiler crash ({signal}) during Triton/RTOSA compilation"
+        where = re.search(r"UNREACHABLE executed at [^\n]*?([\w.]+:\d+)", _ANSI_ESCAPE.sub("", output))
+        suffix = f": UNREACHABLE at {where.group(1)}" if where else ""
+        return f"RBLN compiler crash ({signal}) during Triton/RTOSA compilation{suffix}"
 
     clean = _ANSI_ESCAPE.sub("", output)
+
+    compilation = _compilation_error_detail(clean)
+    if compilation:
+        return compilation
 
     for pattern, template in _DIAGNOSTICS:
         match = re.search(pattern, clean)
@@ -822,8 +844,9 @@ def _compiler_error_detail(output, returncode):
 
     return f"RBLN worker failed (exit={returncode}); no structured diagnostic"
 
-def _spawn_worker(op, args, timeout):
+def _spawn_worker(op, args, timeout, extra_env=None):
     env = _worker_env(op)
+    env.update(extra_env or {})
     with tempfile.TemporaryDirectory(prefix=f"rbln-triton-{op}-") as triton_home:
         env["TRITON_HOME"] = triton_home
         return subprocess.run(
@@ -954,21 +977,20 @@ def _run_npu_tl(args):
 
 def _run_npu_perf(args):
     records = {}
-    ops = perf.selected_perf_ops(args.only)
+    cases = perf.selected_perf_cases(args.only, getattr(args, "dtypes", ""))
     worker_timeout = 600
-    dtype = perf.PERF_DTYPE_NAME
     print(
-        f"\n[NPU] performance tests: {len(ops)} ops, shape={perf.shape_str(perf.NPU_PERF_SHAPE)}, "
-        f"matmul MxNxK={perf.shape_str(perf.NPU_MATMUL_SHAPE)} {dtype}",
+        f"\n[NPU] performance tests: {len(cases)} op/dtype cases, shape={perf.shape_str(perf.NPU_PERF_SHAPE)}, "
+        f"matmul MxNxK={perf.shape_str(perf.NPU_MATMUL_SHAPE)}",
         flush=True,
     )
 
-    for name in ops:
+    for name, dtype in cases:
         t0 = time.time()
-        key = f"perf.{name}"
+        key = f"perf.{name}.{dtype}"
         op = f"perf_{name}"
         try:
-            process = _spawn_worker(op, args, worker_timeout)
+            process = _spawn_worker(op, args, worker_timeout, {"RBLN_PERF_DTYPE": dtype})
         except subprocess.TimeoutExpired:
             results._record(
                 records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
@@ -1000,7 +1022,7 @@ def _run_npu_perf(args):
         results._record_validation(
             records, key, "perf", dtype, "perf", t0,
             payload["ok"], detail, ms=payload.get("ms"), io_bytes=payload["io_bytes"],
-            op_count=perf.op_count(name, shape), op_unit=perf.op_unit(),
+            op_count=perf.op_count(name, shape), op_unit=perf.op_unit(perf.torch_dtype(dtype)),
         )
 
     return records

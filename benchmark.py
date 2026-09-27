@@ -70,9 +70,11 @@ def _native_error_summary(exc: Exception, output: str) -> str:
                 "Triton backend error: "
                 + line.split("error:", 1)[1].strip()[:700]
             )
-    message = str(exc).strip()
+    # A Triton CompilationError starts with its source location and ends
+    # with the cause; keep both and drop the source and caret lines between.
+    message = [line.strip() for line in str(exc).splitlines() if line.strip().strip("^")]
     if message:
-        return message.splitlines()[0][:700]
+        return " ".join(message[:1] + message[1:][-1:])[:700]
     return f"{type(exc).__name__}: native Triton compilation failed"
 
 def run_quietly(fn, synchronize=None) -> str:

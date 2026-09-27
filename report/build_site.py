@@ -38,6 +38,10 @@ def short_name(hw):
         return "CPU"
     return hw["model"].removeprefix("NVIDIA ")
 
+def perf_name(name):
+    # Reports before the dtype axis named perf tests "perf.<op>"; they were all float32.
+    return f"{name}.float32" if name.count(".") == 1 else name
+
 def history_entry(report):
     return {
         "generated_at": report["generated_at"],
@@ -45,7 +49,7 @@ def history_entry(report):
         "versions": report["versions"],
         "summary": report["summary"],
         "perf": {
-            r["name"]: {"ms": r["ms"], "gbps": r["gbps"], "ops_per_s": r["ops_per_s"], "result": r["result"]}
+            perf_name(r["name"]): {"ms": r["ms"], "gbps": r["gbps"], "ops_per_s": r["ops_per_s"], "result": r["result"]}
             for r in report["results"] if r["module"] == "perf"
         },
     }
@@ -398,7 +402,10 @@ const runLink = run => {
   if (!base || !run.run_id) return "–";
   return `<a href="${base}/actions/runs/${esc(run.run_id)}">${esc(run.workflow || "run")} #${esc(run.run_id)}</a>`;
 };
-const PRIMARY = op => op === "perf.matmul" ? "ops" : "gbps";
+// Perf test names are "perf.<op>.<dtype>".
+const baseOp = name => name.split(".")[1];
+const opDtype = name => name.split(".").slice(2).join(".");
+const PRIMARY = op => baseOp(op) === "matmul" ? "ops" : "gbps";
 const METRIC = {
   ms: {get: p => p.ms, fmt: fmtMs, label: "ms"},
   gbps: {get: p => p.gbps, fmt: fmtGbps, label: "GB/s"},
@@ -444,11 +451,16 @@ document.getElementById("hw-cards").innerHTML = HW.map((h, i) => {
 }).join("");
 
 // Performance table
-const perfOps = [...new Set(HW.flatMap(h => h.latest.results.filter(r => r.module === "perf").map(r => r.name)))];
+const OP_ORDER = ["copy", "exp", "add", "sum", "softmax", "matmul"];
+const DTYPE_ORDER = ["float32", "float16", "bfloat16", "float8_e4m3fn", "int32", "int8"];
+const rank = (list, v) => { const i = list.indexOf(v); return i < 0 ? list.length : i; };
+const perfOps = [...new Set(HW.flatMap(h => h.latest.results.filter(r => r.module === "perf").map(r => r.name)))]
+  .sort((a, b) => rank(OP_ORDER, baseOp(a)) - rank(OP_ORDER, baseOp(b)) || rank(DTYPE_ORDER, opDtype(a)) - rank(DTYPE_ORDER, opDtype(b)) || a.localeCompare(b));
 const OP_NOTES = {
-  "perf.copy": "load/store만", "perf.exp": "단항", "perf.add": "이항",
-  "perf.sum": "exp(x) / 행 합", "perf.softmax": "행 softmax", "perf.matmul": "계산 중심",
+  copy: "load/store만", exp: "단항", add: "이항",
+  sum: "exp(x) / 행 합", softmax: "행 softmax", matmul: "계산 중심",
 };
+const opLabel = op => `${baseOp(op)} · ${opDtype(op)}`;
 let perfMetric = "primary";
 function renderPerf() {
   const head = `<thead><tr><th>연산</th>${HW.map((h, i) => `<th class="hwcol"><span class="swatch" style="background:${color(i)}"></span>${esc(h.hardware.name)}</th>`).join("")}</tr></thead>`;
@@ -461,7 +473,7 @@ function renderPerf() {
       const sub = perfMetric === "ms" ? fmtGbps(r.gbps) : fmtMs(r.ms);
       return `<td class="metric"><span class="main">${m.fmt(m.get(r))}</span><span class="sub">${sub}</span></td>`;
     }).join("");
-    return `<tr><td><span class="opname">${esc(op.replace("perf.", ""))}</span><span class="opnote">${esc(OP_NOTES[op] || "")}</span></td>${cells}</tr>`;
+    return `<tr><td><span class="opname">${esc(opLabel(op))}</span><span class="opnote">${esc(OP_NOTES[baseOp(op)] || "")}</span></td>${cells}</tr>`;
   }).join("");
   document.getElementById("perf-table").innerHTML = head + `<tbody>${rows}</tbody>`;
 }
@@ -477,8 +489,8 @@ renderPerf();
 // Trends: one small chart per hardware, each on its own linear scale.
 const trendOp = document.getElementById("trend-op");
 const trendMetric = document.getElementById("trend-metric");
-trendOp.innerHTML = perfOps.map(op => `<option value="${esc(op)}">${esc(op.replace("perf.", ""))}</option>`).join("");
-if (perfOps.includes("perf.matmul")) trendOp.value = "perf.matmul";
+trendOp.innerHTML = perfOps.map(op => `<option value="${esc(op)}">${esc(opLabel(op))}</option>`).join("");
+if (perfOps.includes("perf.matmul.float32")) trendOp.value = "perf.matmul.float32";
 
 function niceTicks(lo, hi, n = 4) {
   if (hi <= lo) hi = lo + (lo === 0 ? 1 : Math.abs(lo) * 0.1);

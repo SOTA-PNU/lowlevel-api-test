@@ -156,14 +156,30 @@ GB/s는 이 입출력 데이터 크기와 실행 시간을 기준으로 계산�
 기능 테스트의 `[1, 64, 64]` 입력(16 KiB)은 실행 시간이 호출 오버헤드에 묻혀
 처리량을 측정하기에는 너무 작습니다. 그래서 기능 테스트가 끝난 뒤, 대표 연산
 6개(`copy`, `exp`, `add`, `sum`, `softmax`, `matmul`)를 큰 입력으로 다시 측정합니다.
-결과는 `perf` 모듈의 `perf.<op>` 항목으로 기록되며, 출력값도 torch 결과와 비교해
+각 연산은 아래 dtype마다 한 번씩 실행되며, 결과는 `perf` 모듈의 `perf.<op>.<dtype>`
+항목(예: `perf.matmul.float16`)으로 기록됩니다. 출력값도 torch 결과와 비교해
 검증합니다. 구현은 `perf.py`에 있습니다.
 
-| 장치 | 원소별 연산 입력 (fp32) | tensor 1개 크기 | matmul M×N×K | 커널 구조 |
-|---|---|---|---|---|
-| CUDA | `[4096, 4096]` | 64 MiB | 4096³ (TF32) | 타일마다 program 하나, grid로 실행 |
-| CPU | `[4096, 4096]` | 64 MiB | 2048³ (IEEE fp32) | 타일마다 program 하나, grid로 실행 |
-| NPU | `[1, 2048, 1024]` | 8 MiB | 8192×256×1024 | `grid=(1,)`, 정적 타일을 `tl.static_range`로 순회 |
+| 연산 | dtype |
+|---|---|
+| `copy`, `add` | float32, float16, bfloat16, int8, int32 |
+| `exp`, `sum`, `softmax` | float32, float16, bfloat16 |
+| `matmul` | float32, float16, bfloat16, int8, float8_e4m3fn |
+
+커널은 입력 dtype 그대로 계산합니다. 백엔드나 Triton이 해당 dtype을 지원하지 않으면
+내부에서 다른 dtype으로 바꿔 실행하지 않고 ERROR로 기록합니다. 예를 들어 `tl.exp`는
+fp32/fp64만 받으므로 fp16/bf16 `exp`, `sum`은 CPU/CUDA에서도 ERROR입니다.
+matmul 출력은 int8 입력이면 int32, fp8 입력이면 float16이고, 나머지는 입력과 같은
+dtype입니다.
+
+| 장치 | 원소별 연산 입력 | matmul M×N×K | 커널 구조 |
+|---|---|---|---|
+| CUDA | `[4096, 4096]` | 4096³ (fp32는 TF32) | 타일마다 program 하나, grid로 실행 |
+| CPU | `[4096, 4096]` | 2048³ (fp32는 IEEE) | 타일마다 program 하나, grid로 실행 |
+| NPU | `[1, 2048, 1024]` | 8192×256×1024 | `grid=(1,)`, 정적 타일을 `tl.static_range`로 순회 |
+
+원소 수는 dtype과 관계없이 같으므로, tensor 1개 크기는 dtype에 따라 달라집니다(fp32
+`[4096, 4096]`은 64 MiB, fp16은 32 MiB, int8은 16 MiB).
 
 - `sum`은 기능 테스트의 `tl.sum`과 같은 식(`exp(x) / 행 합`)이고, `softmax`는 행 단위 softmax입니다.
 - `matmul`은 K 길이의 누적 오차와 저정밀 연산 장치(TF32, NPU 행렬 연산기)를 고려해
@@ -174,7 +190,8 @@ GB/s는 이 입출력 데이터 크기와 실행 시간을 기준으로 계산�
   `DEVICE_GRAPH_CONVERSION`으로 컴파일에 실패하므로 N을 타일 폭(256)에 맞추고 M을 키웁니다.
 - NPU는 CPU tensor를 입력으로 compiled model 호출 전체를 측정하므로, host↔NPU 전송 시간이 포함됩니다.
 - `--only`를 주면 목록에 포함된 성능 연산만 실행합니다. `copy`, `matmul`처럼 성능
-  테스트에만 있는 이름도 지정할 수 있습니다.
+  테스트에만 있는 이름도 지정할 수 있습니다. `--dtypes float16,int8`처럼 주면 성능
+  테스트를 해당 dtype으로만 실행합니다.
 
 ### FLOPS/OPS
 
