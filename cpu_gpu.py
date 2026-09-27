@@ -375,7 +375,7 @@ ATOMIC_MODES = {
     "atomic_add": 0, "atomic_max": 1, "atomic_min": 2, "atomic_and": 3,
     "atomic_or": 4, "atomic_xor": 5, "atomic_xchg": 6, "atomic_cas": 7,
 }
-FLOAT_ATOMIC_OPS = {"atomic_add", "atomic_max", "atomic_min", "atomic_cas"}
+FLOAT_ATOMIC_OPS = {"atomic_add", "atomic_max", "atomic_min", "atomic_xchg", "atomic_cas"}
 NPU_SHAPE_MODES = {"ravel": 0, "view": 1, "cat": 2, "join": 3, "split": 4}
 NPU_MISC_OPS = {"swizzle2d": 0, "umulhi": 1}
 META_RUNTIME_MODES = {

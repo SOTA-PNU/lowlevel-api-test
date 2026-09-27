@@ -269,7 +269,7 @@ def shared_arg_reduce_fake(x: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::shared_atomic", mutates_args={})
 def shared_atomic_wrapper(x: torch.Tensor) -> torch.Tensor:
-    buf = x.clone().to(torch.int32); out = torch.empty_like(buf); warmup(RBLN_KERNELS.atomic, buf, out, RBLN_BATCH, ROWS, COLS, _active_mode(ATOMIC_MODES)); return out
+    buf = x.clone(); out = torch.empty_like(buf); warmup(RBLN_KERNELS.atomic, buf, out, RBLN_BATCH, ROWS, COLS, _active_mode(ATOMIC_MODES)); return out
 
 @register_fake("rbln_triton_ops::shared_atomic")
 def shared_atomic_fake(x: torch.Tensor) -> torch.Tensor:

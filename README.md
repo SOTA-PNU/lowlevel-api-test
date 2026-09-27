@@ -207,7 +207,7 @@ FLOPS = logical ops / elapsed seconds
 입력 dtype이 다른 테스트는 다음과 같습니다.
 
 - `int32`: `cdiv`, `xor_sum`, `umulhi`, `histogram`, `atomic_and`, `atomic_or`,
-  `atomic_xor`, `atomic_xchg`
+  `atomic_xor`
 - `uint8`: `dot_scaled`
 
 shape가 다른 공통 테스트는 다음과 같습니다.
