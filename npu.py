@@ -305,17 +305,15 @@ def shared_meta_runtime_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::shared_dot_scaled", mutates_args={})
 def shared_dot_scaled_wrapper(a: torch.Tensor, b: torch.Tensor,
-                              a_scale: torch.Tensor,
                               b_scale: torch.Tensor) -> torch.Tensor:
     out = torch.empty((16, 16), dtype=torch.float32, device=a.device)
     warmup(
-        RBLN_KERNELS.dot_scaled, a, b, a_scale, b_scale, out, 16, 16, 64
+        RBLN_KERNELS.dot_scaled, a, b, b_scale, out, 16, 16, 64
     )
     return out
 
 @register_fake("rbln_triton_ops::shared_dot_scaled")
 def shared_dot_scaled_fake(a: torch.Tensor, b: torch.Tensor,
-                           a_scale: torch.Tensor,
                            b_scale: torch.Tensor) -> torch.Tensor:
     return torch.empty((16, 16), dtype=torch.float32, device=a.device)
 
@@ -474,8 +472,8 @@ class MetaRuntimeModel(torch.nn.Module):
         return torch.ops.rbln_triton_ops.shared_meta_runtime(x, y)
 
 class DotScaledModel(torch.nn.Module):
-    def forward(self, a, b, a_scale, b_scale):
-        return torch.ops.rbln_triton_ops.shared_dot_scaled(a, b, a_scale, b_scale)
+    def forward(self, a, b, b_scale):
+        return torch.ops.rbln_triton_ops.shared_dot_scaled(a, b, b_scale)
 
 class BlockTypeModel(torch.nn.Module):
     def forward(self, x):
@@ -508,12 +506,11 @@ def _make_test_case(op):
         expected = torch.exp(x) if op == "inline_asm_elementwise" else None
         return model, (x,), expected, normalize
     if op == "dot_scaled":
-        a = torch.zeros((16, 64), dtype=torch.uint8)
-        b = torch.zeros((64, 16), dtype=torch.uint8)
-        a_scale = torch.full((16, 2), 127, dtype=torch.uint8)
-        b_scale = torch.full((16, 2), 127, dtype=torch.uint8)
-        expected = torch.zeros((16, 16), dtype=torch.float32)
-        return DotScaledModel(), (a, b, a_scale, b_scale), expected, normalize
+        a = torch.ones((16, 64), dtype=torch.bfloat16)
+        b = torch.full((64, 16), 2, dtype=torch.bfloat16)
+        b_scale = torch.full((16, 2), 128, dtype=torch.uint8)
+        expected = torch.full((16, 16), 256, dtype=torch.float32)
+        return DotScaledModel(), (a, b, b_scale), expected, normalize
     if op == "zeros":
         x = torch.linspace(
             -1.0, 1.0, RBLN_BATCH * ROWS * COLS, dtype=x.dtype

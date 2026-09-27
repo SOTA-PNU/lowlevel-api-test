@@ -690,24 +690,12 @@ def shared_binary(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr
 
 @triton.jit
 def shared_where(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, cols: tl.constexpr):
-    x_block = tl.make_block_ptr(
-        base=x_ptr, shape=(batch, rows, cols),
-        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
-        block_shape=(batch, rows, cols), order=(2, 1, 0),
-    )
-    y_block = tl.make_block_ptr(
-        base=y_ptr, shape=(batch, rows, cols),
-        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
-        block_shape=(batch, rows, cols), order=(2, 1, 0),
-    )
-    out_block = tl.make_block_ptr(
-        base=out_ptr, shape=(batch, rows, cols),
-        strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
-        block_shape=(batch, rows, cols), order=(2, 1, 0),
-    )
-    x = tl.load(x_block)
-    y = tl.load(y_block)
-    tl.store(out_block, tl.where(x > y, x, y))
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x = tl.load(x_ptr + offsets)
+    y = tl.load(y_ptr + offsets)
+    tl.store(out_ptr + offsets, tl.where(x > y, x, y))
 
 @triton.jit
 def shared_reduce(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
@@ -900,67 +888,63 @@ def shared_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
 @triton.jit
 def shared_misc(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                 cols: tl.constexpr, mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    yb = tl.make_block_ptr(y_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x, y = tl.load(xb), tl.load(yb)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x, y = tl.load(x_ptr + offsets), tl.load(y_ptr + offsets)
     if mode == 0:
         out = tl.cast(x, tl.int32)
     elif mode == 1:
         out = tl.clamp(x, -0.5, 0.5)
     else:
         out = tl.fma(x, y, 1.0)
-    tl.store(ob, out)
+    tl.store(out_ptr + offsets, out)
 
 @triton.jit
 def shared_creation(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                     cols: tl.constexpr, mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x = tl.load(xb)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x = tl.load(x_ptr + offsets)
     if mode == 0:
-        base = tl.arange(0, cols)[None, None, :]
+        base = tl.arange(0, cols)[None, :]
         out = x * 0.0 + base
     elif mode == 1:
-        out = tl.exp(x + tl.full((batch, rows, cols), 3.0, x.dtype))
+        out = tl.exp(x + tl.full((batch * rows, cols), 3.0, x.dtype))
     elif mode == 2:
         out = tl.exp(x + tl.zeros_like(x))
     else:
         out = tl.cdiv(x, 2).to(tl.float32)
-    tl.store(ob, out)
+    tl.store(out_ptr + offsets, out)
 
 @triton.jit
 def shared_hint(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                 cols: tl.constexpr, n_elements, mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x = tl.load(xb)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x = tl.load(x_ptr + offsets)
     if mode == 0:
         tl.assume(n_elements > 0)
         hinted = x
     elif mode == 1:
-        hinted = tl.multiple_of(x, [1, 1, 1])
+        hinted = tl.multiple_of(x, [1, 1])
     elif mode == 2:
-        hinted = tl.max_contiguous(x, [1, 1, 1])
+        hinted = tl.max_contiguous(x, [1, 1])
     else:
-        hinted = tl.max_constancy(x, [1, 1, 1])
-    tl.store(ob, tl.exp(hinted))
+        hinted = tl.max_constancy(x, [1, 1])
+    tl.store(out_ptr + offsets, tl.exp(hinted))
 
 @triton.jit
 def shared_program(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                    cols: tl.constexpr, mode: tl.constexpr):
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    zeros = tl.zeros((batch, rows, cols), out_ptr.dtype.element_ty)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    zeros = tl.zeros((batch * rows, cols), out_ptr.dtype.element_ty)
     out = zeros + (tl.program_id(0) if mode == 0 else tl.num_programs(0))
-    tl.store(ob, out)
+    tl.store(out_ptr + offsets, out)
 
 @triton.jit
 def shared_npu_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
@@ -978,9 +962,9 @@ def shared_npu_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
 @triton.jit
 def shared_random(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                   cols: tl.constexpr, mode: tl.constexpr):
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    offs = tl.arange(0, cols)[None, None, :] + tl.arange(0, rows)[None, :, None] * cols
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offs = row * cols + col
     seed = 1234
     if mode == 0:
         out = tl.rand(seed, offs)
@@ -1002,7 +986,7 @@ def shared_random(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         a, b, c, d = tl.philox(seed, offs, offs * 0, offs * 0, offs * 0); out = (a + b + c + d).to(tl.float32)
     else:
         u = offs.to(tl.uint32); a, b, c, d = tl.philox_impl(u, u * 0, u * 0, u * 0, u + 1, u + 2); out = (a + b + c + d).to(tl.float32)
-    tl.store(ob, out)
+    tl.store(out_ptr + offs, out)
 
 @triton.jit
 def _shared_sum(a, b):
@@ -1011,21 +995,20 @@ def _shared_sum(a, b):
 @triton.jit
 def shared_scan(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                 cols: tl.constexpr, mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x = tl.load(xb)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x = tl.load(x_ptr + offsets)
     if mode == 0:
-        out = tl.cumsum(x, axis=2)
+        out = tl.cumsum(x, axis=1)
     elif mode == 1:
-        out = tl.cumprod(x, axis=2)
+        out = tl.cumprod(x, axis=1)
     elif mode == 2:
-        out = tl.associative_scan(x, 2, _shared_sum)
+        out = tl.associative_scan(x, 1, _shared_sum)
     else:
-        reduced = tl.reduce(x, 2, _shared_sum, keep_dims=True)
+        reduced = tl.reduce(x, 1, _shared_sum, keep_dims=True)
         out = x * 0.0 + reduced
-    tl.store(ob, out)
+    tl.store(out_ptr + offsets, out)
 
 @triton.jit
 def shared_ordering(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
@@ -1068,18 +1051,17 @@ def shared_layout(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr
 @triton.jit
 def shared_arg_reduce(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                       cols: tl.constexpr, mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x = tl.load(xb)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x = tl.load(x_ptr + offsets)
     if mode == 0:
-        r = tl.argmax(x, axis=2, keep_dims=True)
+        r = tl.argmax(x, axis=1, keep_dims=True)
     elif mode == 1:
-        r = tl.argmin(x, axis=2, keep_dims=True)
+        r = tl.argmin(x, axis=1, keep_dims=True)
     else:
-        r = tl.xor_sum(x, axis=2, keep_dims=True)
-    tl.store(ob, x * 0 + r)
+        r = tl.xor_sum(x, axis=1, keep_dims=True)
+    tl.store(out_ptr + offsets, x * 0 + r)
 
 @triton.jit
 def shared_atomic(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
@@ -1099,79 +1081,81 @@ def shared_atomic(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
 @triton.jit
 def shared_npu_shape(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                      cols: tl.constexpr, mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    yb = tl.make_block_ptr(y_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x, y = tl.load(xb), tl.load(yb)
-    if mode == 0: out = tl.reshape(tl.ravel(x), (batch, rows, cols))
-    elif mode == 1: out = tl.reshape(tl.view(x, (rows, cols)), (batch, rows, cols))
+    if mode == 0:
+        offsets = tl.arange(0, batch * rows * cols)
+        x = tl.load(x_ptr + offsets)
+        out = tl.ravel(tl.reshape(x, (batch * rows, cols)))
+        tl.store(out_ptr + offsets, out)
     elif mode == 2:
         half: tl.constexpr = batch * rows * cols // 2
         offsets = tl.arange(0, half)
         left = tl.load(x_ptr + offsets)
         right = tl.load(x_ptr + half + offsets)
-        out = tl.reshape(
-            tl.cat(left, right, can_reorder=True), (batch, rows, cols)
-        )
-    elif mode == 3:
-        left_x = tl.make_block_ptr(
-            x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-            (0, 0, 0), (batch, rows, cols // 2), (2, 1, 0),
-        )
-        left_y = tl.make_block_ptr(
-            y_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-            (0, 0, 0), (batch, rows, cols // 2), (2, 1, 0),
-        )
-        out = tl.reshape(
-            tl.join(tl.load(left_x), tl.load(left_y)),
-            (batch, rows, cols),
-        )
+        out = tl.cat(left, right, can_reorder=True)
+        tl.store(out_ptr + tl.arange(0, batch * rows * cols), out)
     else:
-        a, b = tl.split(tl.reshape(x, (batch, rows, cols // 2, 2)))
-        left_out = tl.make_block_ptr(
-            out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-            (0, 0, 0), (batch, rows, cols // 2), (2, 1, 0),
-        )
-        right_out = tl.make_block_ptr(
-            out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-            (0, 0, cols // 2), (batch, rows, cols // 2), (2, 1, 0),
-        )
-        tl.store(left_out, a)
-        tl.store(right_out, b)
-    if mode != 4:
-        tl.store(ob, out)
+        xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                               (0, 0, 0), (batch, rows, cols), (2, 1, 0))
+        yb = tl.make_block_ptr(y_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                               (0, 0, 0), (batch, rows, cols), (2, 1, 0))
+        ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                               (0, 0, 0), (batch, rows, cols), (2, 1, 0))
+        x, y = tl.load(xb), tl.load(yb)
+        if mode == 1:
+            out = tl.reshape(tl.view(x, (rows, cols)), (batch, rows, cols))
+        elif mode == 3:
+            left_x = tl.make_block_ptr(
+                x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                (0, 0, 0), (batch, rows, cols // 2), (2, 1, 0),
+            )
+            left_y = tl.make_block_ptr(
+                y_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                (0, 0, 0), (batch, rows, cols // 2), (2, 1, 0),
+            )
+            out = tl.reshape(
+                tl.join(tl.load(left_x), tl.load(left_y)),
+                (batch, rows, cols),
+            )
+        else:
+            a, b = tl.split(tl.reshape(x, (batch, rows, cols // 2, 2)))
+            left_out = tl.make_block_ptr(
+                out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                (0, 0, 0), (batch, rows, cols // 2), (2, 1, 0),
+            )
+            right_out = tl.make_block_ptr(
+                out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
+                (0, 0, cols // 2), (batch, rows, cols // 2), (2, 1, 0),
+            )
+            tl.store(left_out, a)
+            tl.store(right_out, b)
+        if mode != 4:
+            tl.store(ob, out)
 
 @triton.jit
 def shared_npu_misc(x_ptr, y_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
                     cols: tl.constexpr, mode: tl.constexpr):
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    offs = tl.arange(0, cols)[None, None, :] + tl.arange(0, rows)[None, :, None] * cols
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offs = row * cols + col
     if mode == 0:
         i, j = tl.swizzle2d(offs // cols, offs % cols, rows, cols, 4); out = (i * cols + j).to(out_ptr.dtype.element_ty)
     else:
         x = tl.load(x_ptr + offs); y = tl.load(y_ptr + offs); out = tl.umulhi(x, y)
-    tl.store(ob, out)
+    tl.store(out_ptr + offs, out)
 
 @triton.jit
 def shared_meta_runtime(x_ptr, y_ptr, out_ptr, batch: tl.constexpr,
                         rows: tl.constexpr, cols: tl.constexpr,
                         mode: tl.constexpr):
-    xb = tl.make_block_ptr(x_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    yb = tl.make_block_ptr(y_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
-                           (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    x = tl.load(xb)
-    y = tl.load(yb)
+    row = tl.arange(0, batch * rows)[:, None]
+    col = tl.arange(0, cols)[None, :]
+    offsets = row * cols + col
+    x = tl.load(x_ptr + offsets)
+    y = tl.load(y_ptr + offsets)
     if mode == 0:
         all_values = tl.maximum(x, y, propagate_nan=tl.PropagateNan.ALL)
         none_values = tl.maximum(x, y, propagate_nan=tl.PropagateNan.NONE)
-        lane = tl.arange(0, cols)[None, None, :]
+        lane = tl.arange(0, cols)[None, :]
         out = tl.where(lane < cols // 2, all_values, none_values)
     elif mode == 1:
         out = x * 0
@@ -1181,13 +1165,13 @@ def shared_meta_runtime(x_ptr, y_ptr, out_ptr, batch: tl.constexpr,
         tl.device_print("rbln-runtime-device-print", x)
         out = x
     elif mode == 3:
-        index = ((tl.arange(0, cols) + 1) % cols)[None, None, :]
-        index = tl.broadcast_to(index, (batch, rows, cols))
-        out = tl.gather(x, index, axis=2)
+        index = ((tl.arange(0, cols) + 1) % cols)[None, :]
+        index = tl.broadcast_to(index, (batch * rows, cols))
+        out = tl.gather(x, index, axis=1)
     else:
         counts = tl.histogram(tl.ravel(x), cols)
-        out = x * 0 + counts[None, None, :]
-    tl.store(ob, out)
+        out = x * 0 + counts[None, :]
+    tl.store(out_ptr + offsets, out)
 
 @triton.jit
 def shared_block_type(x_ptr, out_ptr, batch: tl.constexpr,
@@ -1259,18 +1243,16 @@ def shared_tensor_compile(x_ptr, out_ptr, batch: tl.constexpr,
     tl.store(ob, tl.exp(rebuilt))
 
 @triton.jit
-def shared_dot_scaled(a_ptr, b_ptr, a_scale_ptr, b_scale_ptr, out_ptr,
+def shared_dot_scaled(a_ptr, b_ptr, b_scale_ptr, out_ptr,
                       m: tl.constexpr, n: tl.constexpr, k: tl.constexpr):
     a_offs = tl.arange(0, m)[:, None] * k + tl.arange(0, k)[None, :]
     b_offs = tl.arange(0, k)[:, None] * n + tl.arange(0, n)[None, :]
     scale_k: tl.constexpr = k // 32
-    a_scale_offs = tl.arange(0, m)[:, None] * scale_k + tl.arange(0, scale_k)[None, :]
     b_scale_offs = tl.arange(0, n)[:, None] * scale_k + tl.arange(0, scale_k)[None, :]
     a = tl.load(a_ptr + a_offs)
     b = tl.load(b_ptr + b_offs)
-    a_scale = tl.load(a_scale_ptr + a_scale_offs)
     b_scale = tl.load(b_scale_ptr + b_scale_offs)
-    out = tl.dot_scaled(a, None, "e4m3", b, b_scale, "e4m3")
+    out = tl.dot_scaled(a, None, "bf16", b, b_scale, "bf16")
     out_offs = tl.arange(0, m)[:, None] * n + tl.arange(0, n)[None, :]
     tl.store(out_ptr + out_offs, out)
 
@@ -1726,18 +1708,15 @@ def run_shared_tl(args, triton_module, tl_module):
                     x, out, RBLN_BATCH, ROWS, COLS,
                 )
             elif name == "dot_scaled":
-                a = torch.zeros((16, 64), device=device, dtype=torch.uint8)
-                b = torch.zeros((64, 16), device=device, dtype=torch.uint8)
-                a_scale = torch.full(
-                    (16, 2), 127, device=device, dtype=torch.uint8
-                )
+                a = torch.ones((16, 64), device=device, dtype=torch.bfloat16)
+                b = torch.full((64, 16), 2, device=device, dtype=torch.bfloat16)
                 b_scale = torch.full(
-                    (16, 2), 127, device=device, dtype=torch.uint8
+                    (16, 2), 128, device=device, dtype=torch.uint8
                 )
                 out = torch.empty((16, 16), device=device, dtype=torch.float32)
-                expected = torch.zeros_like(out)
+                expected = torch.full_like(out, 256)
                 kernel, kernel_args = kernels.dot_scaled, (
-                    a, b, a_scale, b_scale, out, 16, 16, 64,
+                    a, b, b_scale, out, 16, 16, 64,
                 )
             elif name in TL_META_COMPILE:
                 validate_meta_symbol(name, tl, x.dtype)
@@ -1767,7 +1746,7 @@ def run_shared_tl(args, triton_module, tl_module):
             ):
                 out = kernel_args[2]
             elif name == "dot_scaled":
-                out = kernel_args[4]
+                out = kernel_args[3]
             else:
                 out = kernel_args[1]
             def launch():
