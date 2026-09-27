@@ -1,6 +1,10 @@
+import os
+import platform
+import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from importlib import metadata
 from enum import Enum
 from typing import Dict, Optional, Tuple
 import torch
@@ -293,3 +297,86 @@ def generate_report(results: Dict[str, TestResultInfo], args, triton_module, api
             )
 
     return "\n".join(lines)
+
+JSON_SCHEMA_VERSION = 1
+_RUN_ENV = {
+    "sha": "GITHUB_SHA",
+    "ref": "GITHUB_REF_NAME",
+    "repository": "GITHUB_REPOSITORY",
+    "workflow": "GITHUB_WORKFLOW",
+    "job": "GITHUB_JOB",
+    "run_id": "GITHUB_RUN_ID",
+    "run_attempt": "GITHUB_RUN_ATTEMPT",
+    "runner": "RUNNER_NAME",
+}
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+def _cpu_model() -> str:
+    try:
+        with open("/proc/cpuinfo") as cpuinfo:
+            for line in cpuinfo:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or "unknown"
+
+def _hardware_info(backend: str, label: str) -> Dict[str, str]:
+    # Labels look like "CUDA (NVIDIA RTX PRO 6000 ...)" or "NPU (RBLN-CA22; 2 cards, 2 chips)".
+    match = re.search(r"\(([^;)]+)", label)
+    model = match.group(1).strip() if match else (_cpu_model() if backend == "cpu" else label)
+    return {"id": f"{backend}-{_slug(model)}", "backend": backend, "model": model, "label": label}
+
+def _package_version(name: str) -> Optional[str]:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return None
+
+def generate_json(results: Dict[str, TestResultInfo], args, triton_module) -> dict:
+    """Machine-readable report consumed by report/summary.py and report/build_site.py."""
+    devices = sorted({r.device for r in results.values() if r.device != "unknown"})
+    label = devices[0] if devices else _device_string()
+    groups = {
+        "functional": [r for r in results.values() if r.module != "perf"],
+        "perf": [r for r in results.values() if r.module == "perf"],
+    }
+    return {
+        "schema_version": JSON_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "run": {key: os.environ.get(env) for key, env in _RUN_ENV.items()},
+        "hardware": _hardware_info(args.device, label),
+        "versions": {
+            "triton": getattr(triton_module, "__version__", None),
+            "torch": torch.__version__,
+            "rebel_compiler": _package_version("rebel-compiler"),
+            "python": platform.python_version(),
+        },
+        "config": {"size": args.size, "block": args.block, "warmup": args.warmup,
+                   "rep": args.rep, "only": args.only},
+        "summary": {
+            group: {status.value.lower(): sum(r.result == status for r in rows) for status in TestResult}
+            | {"total": len(rows)}
+            for group, rows in groups.items()
+        },
+        "results": [
+            {
+                "name": name,
+                "module": r.module,
+                "dtype": r.dtype,
+                "mode": r.mode,
+                "result": r.result.value,
+                "exec": r.exec_status,
+                "accuracy": r.accuracy_status,
+                "ms": r.ms,
+                "gbps": r.gbps,
+                "ops_per_s": r.ops_per_s,
+                "ops_unit": r.ops_unit if r.ops_per_s is not None else None,
+                "execution_time": round(r.execution_time, 3),
+                "detail": _report_detail(r.detail),
+            }
+            for name, r in sorted(results.items())
+        ],
+    }

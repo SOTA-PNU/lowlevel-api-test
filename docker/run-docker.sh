@@ -33,10 +33,31 @@ sync_test_sources() {
     done
 }
 
+copy_results() {
+    if [ -n "${RESULTS_JSON:-}" ]; then
+        docker cp "$CONTAINER_NAME:/workspace/results.json" "$RESULTS_JSON"
+        echo ">>> JSON report copied to $RESULTS_JSON"
+    fi
+}
+
 run_test() {
     local device="$1"
     echo "Running Triton tests on device: $device"
     CONTAINER_NAME="triton-test-$$"
+
+    # Pass CI run metadata into the report; RESULTS_JSON enables the JSON report.
+    local exec_args=()
+    local var
+    for var in GITHUB_SHA GITHUB_REF_NAME GITHUB_REPOSITORY GITHUB_WORKFLOW GITHUB_JOB \
+               GITHUB_RUN_ID GITHUB_RUN_ATTEMPT RUNNER_NAME; do
+        if [ -n "${!var:-}" ]; then
+            exec_args+=(-e "$var")
+        fi
+    done
+    local json_args=()
+    if [ -n "${RESULTS_JSON:-}" ]; then
+        json_args=(--json-out /workspace/results.json)
+    fi
     
     cleanup_container() {
         if [ -n "$CONTAINER_NAME" ]; then
@@ -62,9 +83,9 @@ run_test() {
         sync_test_sources
 
         echo ">>> Running tests..."
-        docker exec "$CONTAINER_NAME" \
+        docker exec "${exec_args[@]}" "$CONTAINER_NAME" \
             env -u TRITON_BACKENDS_IN_TREE \
-            /opt/triton-venv/bin/python -u triton_test.py --device npu
+            /opt/triton-venv/bin/python -u triton_test.py --device npu "${json_args[@]}"
 
     elif [ "$device" = "cuda" ]; then
         echo "Starting GPU test container..."
@@ -80,8 +101,8 @@ run_test() {
         sync_test_sources
 
         echo ">>> Running tests..."
-        docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python -u triton_test.py --device cuda
+        docker exec "${exec_args[@]}" "$CONTAINER_NAME" \
+            /opt/triton-venv/bin/python -u triton_test.py --device cuda "${json_args[@]}"
 
     elif [ "$device" = "cpu" ]; then
         echo "Starting CPU test container..."
@@ -96,13 +117,15 @@ run_test() {
         sync_test_sources
 
         echo ">>> Running tests..."
-        docker exec "$CONTAINER_NAME" \
-            /opt/triton-venv/bin/python -u triton_test.py --device cpu
+        docker exec "${exec_args[@]}" "$CONTAINER_NAME" \
+            /opt/triton-venv/bin/python -u triton_test.py --device cpu "${json_args[@]}"
 
     else
         echo "Unknown device: $device"
         exit 1
     fi
+
+    copy_results
 }
 
 main() {

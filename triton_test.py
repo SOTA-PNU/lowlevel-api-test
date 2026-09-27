@@ -1,6 +1,7 @@
 import argparse
 import glob
 import importlib.util
+import json
 import os
 import shutil
 import torch
@@ -57,6 +58,7 @@ def main():
     parser.add_argument("--block", type=int, default=256)
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--rep", type=int, default=100)
+    parser.add_argument("--json-out", type=str, default="", help="Also write the report as JSON to this path.")
     args = parser.parse_args()
     
     if args.warmup < 0:
@@ -74,6 +76,10 @@ def main():
     records, triton_module, api = _run(args)
     report = results.generate_report(records, args, triton_module, api)
     print("\n" + report)
+    if args.json_out:
+        with open(args.json_out, "w") as file:
+            json.dump(results.generate_json(records, args, triton_module), file, indent=1)
+        print(f"JSON report written to {args.json_out}")
 
 if __name__ == "__main__":
     main()

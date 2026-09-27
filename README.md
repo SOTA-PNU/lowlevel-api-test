@@ -234,6 +234,27 @@ shape가 다른 공통 테스트는 다음과 같습니다.
 GitHub Actions에서 실행하는 경우에는 동일한 보고서가 각 job의 실행 로그에 기록됩니다.
 개별 연산에서 FAIL 또는 ERROR가 발생하더라도 보고서가 출력되므로 CI 로그에서 전체 테스트 결과를 확인할 수 있습니다.
 
+### JSON 보고서와 결과 대시보드
+
+`--json-out <path>`를 주면 같은 결과를 JSON으로도 저장합니다. JSON에는 연산자별 결과와 함께
+하드웨어 식별자(예: `npu-rbln-ca22`), 커밋과 실행 번호, Triton·torch·`rebel-compiler` 버전이 들어갑니다.
+
+```bash
+python triton_test.py --device cuda --json-out results.json
+python3 report/summary.py results.json            # Markdown 요약
+python3 report/build_site.py --data . --out _site # 대시보드 HTML
+```
+
+CI에서는 다음 순서로 결과를 모읍니다.
+
+1. 각 테스트 job이 `results.json`을 만들고, 요약을 실행 페이지(Job Summary)에 표시한 뒤
+   `results-<cpu|gpu|npu>` artifact로 올립니다. Docker 테스트는 `RESULTS_JSON` 환경 변수로
+   `docker/run-docker.sh`가 컨테이너 안의 JSON을 꺼내 옵니다.
+2. `Publish Results` 워크플로가 테스트 워크플로 완료 시 실행되어, 브랜치별 최신 실행의
+   artifact를 내려받아 대시보드를 만듭니다.
+3. `main`의 결과만 `results` 브랜치(`data/<하드웨어>/<실행 번호>.json`)에 누적하고 GitHub Pages에
+   배포합니다. 다른 브랜치는 `dashboard-<브랜치>` artifact로 미리보기만 만듭니다.
+
 ## 설정
 
 백엔드별로 별도 가상환경을 사용하는 것을 권장합니다. 현재 Docker 이미지와

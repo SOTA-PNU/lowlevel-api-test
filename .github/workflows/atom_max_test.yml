@@ -52,4 +52,17 @@ jobs:
         run: |
           set -euo pipefail
           env -u TRITON_BACKENDS_IN_TREE PYTHONPATH="" \
-            "$NPU_PYTHON" -u triton_test.py --device npu
+            "$NPU_PYTHON" -u triton_test.py --device npu --json-out results.json
+
+      - name: Summarize results
+        if: ${{ always() && hashFiles('results.json') != '' }}
+        shell: bash
+        run: '"$NPU_PYTHON" report/summary.py results.json >> "$GITHUB_STEP_SUMMARY"'
+
+      - name: Upload results
+        if: ${{ always() && hashFiles('results.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-npu
+          path: results.json
+          retention-days: 90
