@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Triton 테스트 브랜치 목록</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f2;
+  --ink: #111418;
+  --ink-2: #4a5360;
+  --muted: #737c88;
+  --line: #dde1e6;
+  --line-strong: #c4cad2;
+  --accent: #0f6e8c;
+  --accent-soft: #e2f0f4;
+  --good: #006300;
+  --good-soft: #e3f3e3;
+  --bad: #b3261e;
+  --bad-soft: #fbe6e4;
+  --warn: #8a5a00;
+  --warn-soft: #fcf0d6;
+  --none: #737c88;
+  --none-soft: #eef0f2;
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --grid: #e8ebee;
+  --shadow: 0 1px 2px rgba(17, 20, 24, 0.06);
+  --sans: "IBM Plex Sans KR", system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0e1114;
+    --surface: #161a1f;
+    --surface-2: #1d232a;
+    --ink: #f2f4f6;
+    --ink-2: #b7c0ca;
+    --muted: #8a939d;
+    --line: #2a3139;
+    --line-strong: #3a434d;
+    --accent: #4fb3d4;
+    --accent-soft: #15303a;
+    --good: #3fc43f;
+    --good-soft: #14301a;
+    --bad: #ff7b72;
+    --bad-soft: #3a1b1a;
+    --warn: #f2b84b;
+    --warn-soft: #362a12;
+    --none: #8a939d;
+    --none-soft: #1d232a;
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --s4: #c98500;
+    --grid: #232a31;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1114;
+  --surface: #161a1f;
+  --surface-2: #1d232a;
+  --ink: #f2f4f6;
+  --ink-2: #b7c0ca;
+  --muted: #8a939d;
+  --line: #2a3139;
+  --line-strong: #3a434d;
+  --accent: #4fb3d4;
+  --accent-soft: #15303a;
+  --good: #3fc43f;
+  --good-soft: #14301a;
+  --bad: #ff7b72;
+  --bad-soft: #3a1b1a;
+  --warn: #f2b84b;
+  --warn-soft: #362a12;
+  --none: #8a939d;
+  --none-soft: #1d232a;
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
+  --grid: #232a31;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 var(--sans);
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 64px; display: grid; gap: 36px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 18px; font-weight: 600; }
+.mono { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.eyebrow { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; }
+header.top p { margin: 6px 0 0; color: var(--ink-2); max-width: 68ch; }
+.meta-line { font-size: 12px; color: var(--muted); }
+section { display: grid; gap: 14px; }
+.section-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+.section-head p { margin: 0; color: var(--ink-2); font-size: 13px; max-width: 72ch; }
+
+.hw-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.hw-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 16px; display: grid; gap: 12px; align-content: start;
+}
+.hw-name { display: flex; gap: 8px; align-items: center; font-weight: 600; font-size: 15px; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.hw-sub { font-size: 12px; color: var(--muted); margin-top: 2px; word-break: break-word; }
+.bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--surface); }
+.bar span { display: block; height: 100%; }
+.bar .p { background: var(--good); } .bar .f { background: var(--bad); } .bar .e { background: var(--warn); }
+.counts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 12px; font-size: 12px; }
+.counts dt { color: var(--muted); }
+.counts dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 12px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th { font-size: 12px; font-weight: 600; color: var(--ink-2); background: var(--surface-2); position: sticky; top: 0; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+td.metric { text-align: right; white-space: nowrap; }
+td.metric .main { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; }
+td.metric .sub { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+th.hwcol { text-align: right; }
+th.hwcol .swatch { display: inline-block; margin-right: 6px; vertical-align: 1px; }
+.opname { font-family: var(--mono); font-weight: 500; white-space: nowrap; }
+.opnote { display: block; font-size: 11px; color: var(--muted); font-family: var(--sans); font-weight: 400; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button {
+  border: 0; background: transparent; color: var(--ink-2); font: 500 12px var(--sans);
+  padding: 6px 11px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+select, input[type="search"] {
+  font: 13px var(--sans); color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 10px;
+}
+input[type="search"] { min-width: 0; width: 220px; max-width: 100%; }
+label.ctl { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--ink-2); }
+
+.notes { margin: 0; padding: 12px 16px; font-size: 12px; color: var(--ink-2); display: grid; gap: 4px; list-style: none; border-top: 1px solid var(--line); }
+.notes li::before { content: "·"; color: var(--muted); margin-right: 6px; }
+
+.multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.chart { padding: 14px 14px 8px; display: grid; gap: 6px; position: relative; }
+.chart-title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font-size: 13px; font-weight: 600; }
+.chart-title .last { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; }
+.chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart .empty { font-size: 12px; color: var(--muted); padding: 24px 0; text-align: center; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
+  font-size: 11px; line-height: 1.4; padding: 6px 8px; border-radius: 6px; white-space: nowrap; z-index: 2;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill {
+  display: inline-block; min-width: 52px; text-align: center; font: 600 11px/1 var(--mono);
+  padding: 5px 7px; border-radius: 999px; letter-spacing: 0.02em;
+}
+.pill.PASS { background: var(--good-soft); color: var(--good); }
+.pill.FAIL { background: var(--bad-soft); color: var(--bad); }
+.pill.ERROR { background: var(--warn-soft); color: var(--warn); }
+.pill.NONE { background: var(--none-soft); color: var(--none); }
+.matrix td.cell { text-align: center; }
+.matrix tbody tr.row { cursor: pointer; }
+.matrix tbody tr.row:hover td { background: var(--surface-2); }
+.matrix tr.detail td { background: var(--surface-2); font-size: 12px; }
+.matrix tr.detail dl { margin: 0; display: grid; grid-template-columns: minmax(120px, auto) 1fr; gap: 6px 14px; }
+.matrix tr.detail dt { font-weight: 600; color: var(--ink-2); }
+.matrix tr.detail dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; color: var(--ink-2); }
+.module-tag { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.matrix-foot { padding: 10px 14px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
+footer { font-size: 12px; color: var(--muted); }
+@media (max-width: 560px) {
+  .wrap { padding-inline: 16px; }
+  h1 { font-size: 22px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">SOTA-PNU / lowlevel-api-test</div>
+      <h1>브랜치별 테스트 보드</h1>
+      <p>브랜치마다 가장 최근 CI 실행 결과로 만든 대시보드입니다. <a href="../">main 대시보드</a>가 기준 결과입니다.</p>
+    </div>
+  </header>
+  <section>
+    <div class="panel"><div class="scroll"><table>
+      <thead><tr><th>브랜치</th><th>하드웨어</th><th>최근 커밋</th><th>페이지 생성</th></tr></thead>
+      <tbody><tr><td colspan="4" class="muted">게시된 브랜치가 없습니다.</td></tr></tbody>
+    </table></div></div>
+  </section>
+</div>
+
+</body>
+</html>
