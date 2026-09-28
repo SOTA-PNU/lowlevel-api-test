@@ -53,12 +53,18 @@ from cpu_gpu import (
     SUPPORTED_OPS,
     TL_META_COMPILE,
     UNARY_MODES,
+    accumulation_error_bound,
     collect_tl_symbols,
+    dot_inputs,
+    product_input,
     positive_input,
+    reference_input,
     signed_input,
     signed_nonzero_input,
     stepped_input,
     swizzle2d_reference,
+    tl_case_key,
+    tl_cases,
     unary_reference,
     validate_meta_symbol,
 )
@@ -66,6 +72,8 @@ import perf
 
 RBLN_KERNELS = KERNELS
 _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
+# dtype of the worker's test case (functional op/dtype cases and perf tests)
+_TEST_DTYPE = os.environ.get("RBLN_TEST_DTYPE", "float32")
 
 def _active_mode(mapping, default=0):
     return mapping.get(_ACTIVE_OP, default)
@@ -140,13 +148,13 @@ def shared_shape_fake(x: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::shared_dot", mutates_args={})
 def shared_dot_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(a)
+    out = torch.empty_like(a, dtype=perf.matmul_out_dtype(a.dtype))
     warmup(RBLN_KERNELS.dot, a, b, out, RBLN_BATCH, DOT_SIZE)
     return out
 
 @register_fake("rbln_triton_ops::shared_dot")
 def shared_dot_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(a)
+    return torch.empty_like(a, dtype=perf.matmul_out_dtype(a.dtype))
 
 @triton_op("rbln_triton_ops::shared_memory", mutates_args={})
 def shared_memory_wrapper(x: torch.Tensor) -> torch.Tensor:
@@ -388,7 +396,7 @@ def perf_tiled_add_fake(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::perf_tiled_matmul", mutates_args={})
 def perf_tiled_matmul_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    out = torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=a.dtype, device=a.device)
+    out = torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=perf.matmul_out_dtype(a.dtype), device=a.device)
     warmup(
         perf.perf_tiled_matmul, a, b, out, a.shape[0], a.shape[1], a.shape[2], b.shape[2],
         perf.NPU_MATMUL_BLOCK, perf.NPU_MATMUL_BLOCK,
@@ -397,7 +405,7 @@ def perf_tiled_matmul_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 @register_fake("rbln_triton_ops::perf_tiled_matmul")
 def perf_tiled_matmul_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=a.dtype, device=a.device)
+    return torch.empty((a.shape[0], a.shape[1], b.shape[2]), dtype=perf.matmul_out_dtype(a.dtype), device=a.device)
 
 def _selected_ops(only):
     available = tuple(collect_tl_symbols())
@@ -536,12 +544,20 @@ class PerfMatmulModel(torch.nn.Module):
     def forward(self, a, b):
         return torch.ops.rbln_triton_ops.perf_tiled_matmul(a, b)
 
+DTYPE_PROBE_OP = "dtype_probe"
+
 def _make_perf_case(op):
     name = op.removeprefix("perf_")
+    dtype = perf.torch_dtype(_TEST_DTYPE)
+    if op == DTYPE_PROBE_OP:
+        # Block-pointer copy of one small tile (perf_tiled_unary mode 0, the
+        # default for an op missing from NPU_UNARY_MODES).
+        x = positive_input(dtype=dtype)
+        return PerfUnaryModel(), (x,), x.clone(), (lambda t: t)
     if name == "matmul":
-        inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, batch=True)
+        inputs, expected = perf.make_matmul_inputs(perf.NPU_MATMUL_SHAPE, dtype, batch=True)
         return PerfMatmulModel(), inputs, expected, (lambda t: t)
-    inputs, expected = perf.make_inputs(name, perf.NPU_PERF_SHAPE)
+    inputs, expected = perf.make_inputs(name, perf.NPU_PERF_SHAPE, dtype)
     model = PerfAddModel() if name == "add" else PerfUnaryModel()
     return model, inputs, expected, (lambda t: t)
 
@@ -550,7 +566,8 @@ def _make_test_case(op):
         (lambda t: torch.sort(t.reshape(-1)).values) if op == "cat"
         else (lambda t: t)
     )
-    x = positive_input()
+    dt = perf.torch_dtype(_TEST_DTYPE)
+    x = positive_input(dtype=dt)
     if op == "block_type":
         return BlockTypeModel(), (x,), None, normalize
     if op == "tensor":
@@ -574,26 +591,27 @@ def _make_test_case(op):
         return ZerosModel(), (x,), torch.exp(torch.maximum(x, torch.zeros_like(x))), normalize
     if op in UNARY_MODES:
         if op in ROUNDING_UNARY:
-            x = stepped_input()
+            x = stepped_input(dtype=dt)
         elif op not in POSITIVE_ONLY_UNARY:
-            x = signed_input()
+            x = signed_input(dtype=dt)
         return UnaryModel(), (x,), unary_reference(op, x), normalize
     if op in BINARY_MODES:
-        x = signed_input()
-        y = signed_nonzero_input()
+        x = signed_input(dtype=dt)
+        y = signed_nonzero_input(dtype=dt)
+        xr, yr = reference_input(x), reference_input(y)
         expected = {
-            "fdiv": x / y,
-            "maximum": torch.maximum(x, y),
-            "minimum": torch.minimum(x, y),
-            "add": x + y,
-            "sub": x - y,
-            "mul": x * y,
-            "div_rn": x / y,
+            "fdiv": xr / yr,
+            "maximum": torch.maximum(xr, yr),
+            "minimum": torch.minimum(xr, yr),
+            "add": xr + yr,
+            "sub": xr - yr,
+            "mul": xr * yr,
+            "div_rn": xr / yr,
         }[op]
         return BinaryModel(), (x, y), expected, normalize
     if op == "where":
-        x = signed_input()
-        y = signed_input()
+        x = signed_input(dtype=dt)
+        y = signed_input(dtype=dt)
         return WhereModel(), (x, y), torch.where(x > y, x, y), normalize
     if op in REDUCE_MODES:
         reduced = getattr(torch, op)(x, dim=2, keepdim=True)
@@ -619,20 +637,20 @@ def _make_test_case(op):
             expected = x.transpose(1, 2).contiguous()
         return ShapeModel(), (x,), expected, normalize
     if op == "dot":
-        a = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
-        b = torch.randn((RBLN_BATCH, DOT_SIZE, DOT_SIZE), dtype=x.dtype)
-        return DotModel(), (a, b), a @ b, normalize
+        a, b, expected = dot_inputs(dtype=dt)
+        return DotModel(), (a, b), expected, normalize
     if op in MEMORY_MODES:
         return MemoryModel(), (x,), torch.exp(x), normalize
     if op in MISC_MODES:
-        x = signed_input()
-        y = signed_input()
+        x = signed_input(dtype=dt)
+        y = signed_input(dtype=dt)
         if op == "cast":
-            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.float32).reshape(RBLN_BATCH, ROWS, COLS)
+            x = torch.arange(RBLN_BATCH * ROWS * COLS, dtype=torch.float32).reshape(RBLN_BATCH, ROWS, COLS).to(dt)
+        xr, yr = reference_input(x), reference_input(y)
         expected = {
-            "cast": x.to(torch.int32),
-            "clamp": torch.clamp(x, -0.5, 0.5),
-            "fma": x * y + 1.0,
+            "cast": xr.to(torch.int32),
+            "clamp": torch.clamp(xr, -0.5, 0.5),
+            "fma": xr * yr + 1.0,
         }[op]
         return MiscModel(), (x, y), expected, normalize
     if op == "cdiv":
@@ -661,24 +679,26 @@ def _make_test_case(op):
     if op in RANDOM_MODES:
         return RandomModel(), (x,), None, normalize
     if op in SCAN_MODES:
-        x = signed_input()
-        if op in {"cumsum", "associative_scan"}: expected = torch.cumsum(x, dim=2)
-        elif op == "cumprod": expected = torch.cumprod(x, dim=2)
-        else: expected = x.sum(dim=2, keepdim=True).expand_as(x)
+        x = product_input(dtype=dt) if op == "cumprod" else signed_input(dtype=dt)
+        xr = reference_input(x)
+        if op in {"cumsum", "associative_scan"}: expected = torch.cumsum(xr, dim=2)
+        elif op == "cumprod": expected = torch.cumprod(xr, dim=2)
+        else: expected = xr.sum(dim=2, keepdim=True).expand_as(xr)
         return ScanModel(), (x,), expected, normalize
     if op in ORDERING_MODES:
-        x = signed_input()
+        x = signed_input(dtype=dt)
+        xr = reference_input(x)
         if op == "softmax":
-            expected = torch.softmax(x, dim=1)
+            expected = torch.softmax(xr, dim=1)
         else:
-            expected = torch.sort(x, dim=2).values
+            expected = torch.sort(xr, dim=2).values
         return OrderingModel(), (x,), expected, normalize
     if op in LAYOUT_MODES:
-        y = positive_input()
+        y = positive_input(dtype=dt)
         expected = torch.flip(x, dims=[2]) if op == "flip" else torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
         return LayoutModel(), (x, y), expected, normalize
     if op in ARG_REDUCE_MODES:
-        x = signed_input()
+        x = signed_input(dtype=dt)
         if op == "xor_sum":
             x = torch.randint(0, 1 << 16, x.shape, dtype=torch.int32)
         if op == "argmax": reduced = torch.argmax(x, dim=2, keepdim=True)
@@ -697,7 +717,7 @@ def _make_test_case(op):
             normalize,
         )
     if op in NPU_SHAPE_MODES:
-        y = positive_input()
+        y = positive_input(dtype=dt)
         if op == "join": expected = torch.stack((x[:, :, :COLS // 2], y[:, :, :COLS // 2]), dim=-1).reshape_as(x)
         elif op == "split": expected = torch.cat((x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 0], x.reshape(RBLN_BATCH, ROWS, COLS // 2, 2)[..., 1]), dim=2)
         else: expected = x
@@ -708,11 +728,11 @@ def _make_test_case(op):
             y = torch.randint(1 << 29, 1 << 30, x.shape, dtype=torch.int32)
             expected = ((x.to(torch.int64) * y.to(torch.int64)) >> 32).to(torch.int32)
         else:
-            y = positive_input()
+            y = positive_input(dtype=dt)
             expected = swizzle2d_reference()
         return NpuMiscModel(), (x, y), expected, normalize
     if op in META_RUNTIME_MODES:
-        y = positive_input()
+        y = positive_input(dtype=dt)
         if op == "PropagateNan":
             flat_x, flat_y = x.reshape(-1), y.reshape(-1)
             flat_x[0::3] = float("nan")
@@ -747,7 +767,7 @@ _RESULT_MARKER = "RBLN_OP_RESULT="
 def _run_worker(op, warmup, rep):
     benchmark._set_runtime_device("npu")
     model, inputs, expected, normalize = (
-        _make_perf_case(op) if op.startswith("perf_") else _make_test_case(op)
+        _make_perf_case(op) if op.startswith("perf_") or op == DTYPE_PROBE_OP else _make_test_case(op)
     )
     compiled = torch.compile(model, backend="rbln", dynamic=False, options={"mode": ["strict"]})
     actual = compiled(*inputs)
@@ -758,7 +778,11 @@ def _run_worker(op, warmup, rep):
     elif op.startswith("perf_"):
         ok, max_abs, max_rel = perf.compare(op.removeprefix("perf_"), actual, expected)
     else:
-        ok, max_abs, max_rel = results._compare_tensors(normalize(actual), normalize(expected))
+        bound = accumulation_error_bound(op, inputs[0], expected)
+        ok, max_abs, max_rel = (
+            results._compare_tensors(normalize(actual), normalize(expected)) if bound is None
+            else results._compare_with_error_bound(actual, expected, bound)
+        )
 
     ms = None
     if ok:
@@ -797,14 +821,34 @@ _DIAGNOSTICS = (
     (r"RBLNRuntimeError:\s*([^\n]+)", "RBLN model compiler error: {}"),
 )
 
+def _compilation_error_detail(clean):
+    """A Triton CompilationError prints its location, the kernel source up to
+    a caret line and, when there is one, the cause after it."""
+    match = re.search(r"CompilationError: (at \d+:\d+:)\n(.*?)(?:\n\s*\n|\Z)", clean, re.S)
+    if not match:
+        return None
+    lines = match.group(2).splitlines()
+    caret = next((i for i, line in enumerate(lines) if line.strip() and not line.strip().strip("^")), None)
+    if caret is None:
+        return None
+    code = lines[caret - 1].strip() if caret else ""
+    cause = " ".join(line.strip() for line in lines[caret + 1:] if line.strip())
+    return f"Triton compilation error: {match.group(1)} {code}" + (f" -> {cause}" if cause else "")
+
 def _compiler_error_detail(output, returncode):
     if returncode < 0:
         signal = {6: "SIGABRT", 11: "SIGSEGV"}.get(
             -returncode, f"signal {-returncode}"
         )
-        return f"RBLN compiler crash ({signal}) during Triton/RTOSA compilation"
+        where = re.search(r"UNREACHABLE executed at [^\n]*?([\w.]+:\d+)", _ANSI_ESCAPE.sub("", output))
+        suffix = f": UNREACHABLE at {where.group(1)}" if where else ""
+        return f"RBLN compiler crash ({signal}) during Triton/RTOSA compilation{suffix}"
 
     clean = _ANSI_ESCAPE.sub("", output)
+
+    compilation = _compilation_error_detail(clean)
+    if compilation:
+        return compilation
 
     for pattern, template in _DIAGNOSTICS:
         match = re.search(pattern, clean)
@@ -822,8 +866,9 @@ def _compiler_error_detail(output, returncode):
 
     return f"RBLN worker failed (exit={returncode}); no structured diagnostic"
 
-def _spawn_worker(op, args, timeout):
+def _spawn_worker(op, args, timeout, extra_env=None):
     env = _worker_env(op)
+    env.update(extra_env or {})
     with tempfile.TemporaryDirectory(prefix=f"rbln-triton-{op}-") as triton_home:
         env["TRITON_HOME"] = triton_home
         return subprocess.run(
@@ -862,17 +907,55 @@ def _report_dtype(op):
     except Exception:
         return "-"
 
-def _run_npu_tl(args):
+def _probe_dtypes(args, dtypes):
+    """Compile and run a block-pointer copy once per non-float32 dtype.
+
+    A dtype the compiler cannot even copy fails every test, and each failing
+    test still costs a full compile. Cases of a failed dtype are recorded as
+    ERROR without running them; once a compiler update makes the probe pass,
+    they run again with no configuration change. --no-dtype-probe runs all.
+    Returns {dtype: failure detail} for the dtypes that failed.
+    """
+    dtypes = sorted({d for d in dtypes if d and d != "float32"})
+    if getattr(args, "no_dtype_probe", False) or not dtypes:
+        return {}
+    print(f"\n[NPU] dtype probe (block-pointer copy): {', '.join(dtypes)}", flush=True)
+    quick = argparse.Namespace(warmup=0, rep=1)
+    failed = {}
+    for dtype in dtypes:
+        try:
+            process = _spawn_worker(DTYPE_PROBE_OP, quick, 300, {"RBLN_TEST_DTYPE": dtype})
+        except subprocess.TimeoutExpired:
+            failed[dtype] = "probe timed out after 300s"
+            continue
+        line = _worker_result_line(process)
+        if process.returncode != 0 or line is None:
+            failed[dtype] = _compiler_error_detail(process.stdout + "\n" + process.stderr, process.returncode)
+        else:
+            try:
+                if not _decode_worker_payload(line[len(_RESULT_MARKER):]).get("ok"):
+                    failed[dtype] = "probe copy returned wrong values"
+            except ValueError as exc:
+                failed[dtype] = f"invalid probe payload: {exc}"
+        print(f"  {dtype:14} {'FAIL: ' + failed[dtype] if dtype in failed else 'PASS'}", flush=True)
+    return failed
+
+def _probe_skip_detail(dtype, probe_failures):
+    return f"not run: {dtype} dtype probe (block-pointer copy) failed: {probe_failures[dtype]}"[:1000]
+
+def _run_npu_tl(args, probe_failures=None):
+    probe_failures = probe_failures or {}
     records = {}
     ops = _selected_ops(args.only)
     supported_ops = set(SUPPORTED_OPS)
     worker_timeout = 300
-    print(f"\n[NPU] rebel.triton.language callable coverage: {len(ops)} ops", flush=True)
+    cases = tl_cases(ops, getattr(args, "dtypes", ""))
+    print(f"\n[NPU] rebel.triton.language callable coverage: {len(ops)} ops, {len(cases)} op/dtype cases", flush=True)
  
-    for op in ops:
+    for op, case_dtype in cases:
         t0 = time.time()
-        key = f"tl.{op}"
-        dtype = _report_dtype(op)
+        key = tl_case_key(op, case_dtype)
+        dtype = case_dtype or _report_dtype(op)
         # Validate meta APIs
         if op in TL_META_COMPILE:
             try:
@@ -892,9 +975,15 @@ def _run_npu_tl(args):
                 detail="no RBLN compile/execute kernel adapter is defined",
             )
             continue
+        if case_dtype in probe_failures:
+            results._record(
+                records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
+                detail=_probe_skip_detail(case_dtype, probe_failures),
+            )
+            continue
         # Run op in subprocess
         try:
-            process = _spawn_worker(op, args, worker_timeout)
+            process = _spawn_worker(op, args, worker_timeout, {"RBLN_TEST_DTYPE": case_dtype or "float32"})
         except subprocess.TimeoutExpired:
             results._record(
                 records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
@@ -952,23 +1041,29 @@ def _run_npu_tl(args):
 
     return records
 
-def _run_npu_perf(args):
+def _run_npu_perf(args, probe_failures=None):
+    probe_failures = probe_failures or {}
     records = {}
-    ops = perf.selected_perf_ops(args.only)
+    cases = perf.selected_perf_cases(args.only, getattr(args, "dtypes", ""))
     worker_timeout = 600
-    dtype = perf.PERF_DTYPE_NAME
     print(
-        f"\n[NPU] performance tests: {len(ops)} ops, shape={perf.shape_str(perf.NPU_PERF_SHAPE)}, "
-        f"matmul MxNxK={perf.shape_str(perf.NPU_MATMUL_SHAPE)} {dtype}",
+        f"\n[NPU] performance tests: {len(cases)} op/dtype cases, shape={perf.shape_str(perf.NPU_PERF_SHAPE)}, "
+        f"matmul MxNxK={perf.shape_str(perf.NPU_MATMUL_SHAPE)}",
         flush=True,
     )
 
-    for name in ops:
+    for name, dtype in cases:
         t0 = time.time()
-        key = f"perf.{name}"
+        key = f"perf.{name}.{dtype}"
         op = f"perf_{name}"
+        if dtype in probe_failures:
+            results._record(
+                records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
+                detail=_probe_skip_detail(dtype, probe_failures),
+            )
+            continue
         try:
-            process = _spawn_worker(op, args, worker_timeout)
+            process = _spawn_worker(op, args, worker_timeout, {"RBLN_TEST_DTYPE": dtype})
         except subprocess.TimeoutExpired:
             results._record(
                 records, key, "perf", dtype, "perf", results.TestResult.ERROR, t0,
@@ -1000,7 +1095,7 @@ def _run_npu_perf(args):
         results._record_validation(
             records, key, "perf", dtype, "perf", t0,
             payload["ok"], detail, ms=payload.get("ms"), io_bytes=payload["io_bytes"],
-            op_count=perf.op_count(name, shape), op_unit=perf.op_unit(),
+            op_count=perf.op_count(name, shape), op_unit=perf.op_unit(perf.torch_dtype(dtype)),
         )
 
     return records
@@ -1060,8 +1155,13 @@ def run(args):
     print(f"Triton: {getattr(rbln_triton, '__version__', 'unknown')}")
     print(f"Device: {benchmark._device_string()}")
 
-    records = _run_npu_tl(args)
-    records.update(_run_npu_perf(args))
+    dtypes = getattr(args, "dtypes", "")
+    tl_dtypes = [d for _, d in tl_cases(_selected_ops(args.only), dtypes)]
+    perf_dtypes = [d for _, d in perf.selected_perf_cases(args.only, dtypes)]
+    probe_failures = _probe_dtypes(args, tl_dtypes + perf_dtypes)
+
+    records = _run_npu_tl(args, probe_failures)
+    records.update(_run_npu_perf(args, probe_failures))
 
     api = {
         "tl": len(collect_tl_symbols()),

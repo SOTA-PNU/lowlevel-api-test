@@ -66,3 +66,13 @@ jobs:
           name: results-npu
           path: results.json
           retention-days: 90
+
+  publish:
+    name: Publish results
+    needs: test-npu
+    # Publish branch runs only; never tag or pull-request runs.
+    if: ${{ always() && github.ref_type == 'branch' && github.event_name != 'pull_request' }}
+    permissions:
+      contents: write
+      pages: read
+    uses: ./.github/workflows/publish_results.yml

@@ -154,6 +154,16 @@ def _compare_tensors(actual: torch.Tensor, expected: torch.Tensor, rtol: float =
     max_abs, max_rel = _error_metrics(actual, expected)
     return ok, max_abs, max_rel
 
+def _compare_with_error_bound(actual: torch.Tensor, expected: torch.Tensor, bound: torch.Tensor,
+                              rtol: float = 1e-2, atol: float = 1e-2) -> Tuple[bool, float, float]:
+    """Like _compare_tensors, plus a per-element error bound added to the tolerance."""
+    expected = expected.to(actual.dtype)
+    a, e = actual.to(torch.float64), expected.to(torch.float64)
+    close = (a - e).abs() <= atol + rtol * e.abs() + bound.to(torch.float64)
+    close |= (a == e) | (torch.isnan(a) & torch.isnan(e))
+    max_abs, max_rel = _error_metrics(actual, expected)
+    return bool(close.all()), max_abs, max_rel
+
 def _format_error_detail(detail: str, max_abs: float, max_rel: float, reference: str = "cuda_ref") -> str:
     return (
         f"{detail}; ref={reference}; max_abs={max_abs:.6g}; "

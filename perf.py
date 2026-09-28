@@ -20,8 +20,22 @@ if triton is None or tl is None:
     )
 
 PERF_OPS = ("copy", "exp", "add", "sum", "softmax", "matmul")
-PERF_DTYPE = torch.float32
-PERF_DTYPE_NAME = "float32"
+
+# Every op runs once per dtype it is defined for; a backend that cannot
+# compile a combination records it as ERROR.
+FLOAT_DTYPES = ("float32", "float16", "bfloat16")
+INT_DTYPES = ("int8", "int32")
+PERF_DTYPES = {
+    "copy": FLOAT_DTYPES + INT_DTYPES,
+    "add": FLOAT_DTYPES + INT_DTYPES,
+    "exp": FLOAT_DTYPES,
+    "sum": FLOAT_DTYPES,
+    "softmax": FLOAT_DTYPES,
+    "matmul": FLOAT_DTYPES + ("int8", "float8_e4m3fn"),
+}
+# matmul output dtype when it differs from the input: int8 accumulates and
+# stores int32, fp8 stores float16.
+MATMUL_OUT_DTYPES = {"int8": "int32", "float8_e4m3fn": "float16"}
 
 # Logical ops per output element: sum = exp + add + div,
 # softmax = max + sub + exp + add + div. matmul counts 2*M*N*K.
@@ -42,29 +56,60 @@ NPU_UNARY_MODES = {"perf_copy": 0, "perf_exp": 1, "perf_sum": 2, "perf_softmax":
 NPU_MATMUL_SHAPE = (8192, 256, 1024)
 NPU_MATMUL_BLOCK = 256
 
+def _split(value: str):
+    return {part.strip() for part in value.split(",") if part.strip()}
+
 def selected_perf_ops(only: str) -> Tuple[str, ...]:
     if not only:
         return PERF_OPS
-    requested = {part.strip() for part in only.split(",") if part.strip()}
+    requested = _split(only)
     return tuple(op for op in PERF_OPS if op in requested)
 
-def make_matmul_inputs(mnk, device: str = "cpu", batch: bool = False):
+def selected_perf_cases(only: str, dtypes: str = "") -> Tuple[Tuple[str, str], ...]:
+    """(op, dtype) pairs to run, filtered by --only and --dtypes."""
+    wanted = _split(dtypes)
+    return tuple(
+        (op, dtype) for op in selected_perf_ops(only) for dtype in PERF_DTYPES[op]
+        if not wanted or dtype in wanted
+    )
+
+def torch_dtype(name: str) -> torch.dtype:
+    return getattr(torch, name)
+
+def matmul_out_dtype(dtype: torch.dtype) -> torch.dtype:
+    name = str(dtype).removeprefix("torch.")
+    return torch_dtype(MATMUL_OUT_DTYPES.get(name, name))
+
+def _random(shape, dtype: torch.dtype, device: str, offset: float = 0.0, low: int = -60, high: int = 61):
+    # Floats are drawn in float32 and rounded, so the reference sees the same values.
+    if dtype.is_floating_point:
+        return (torch.rand(shape, device=device) + offset).to(dtype)
+    return torch.randint(low, high, shape, device=device, dtype=dtype)
+
+def make_matmul_inputs(mnk, dtype: torch.dtype, device: str = "cpu", batch: bool = False):
     m, n, k = mnk
     lead = (1,) if batch else ()
-    a = torch.rand(lead + (m, k), device=device, dtype=PERF_DTYPE)
-    b = torch.rand(lead + (k, n), device=device, dtype=PERF_DTYPE)
-    return (a, b), a @ b
+    a = _random(lead + (m, k), dtype, device, low=-128, high=128)
+    b = _random(lead + (k, n), dtype, device, low=-128, high=128)
+    if dtype.is_floating_point:
+        expected = a.float() @ b.float()
+    else:
+        # float64 is exact for int8 products summed over K <= 2^37.
+        expected = (a.double() @ b.double()).to(matmul_out_dtype(dtype))
+    return (a, b), expected
 
-def make_inputs(op: str, shape, device: str = "cpu"):
-    x = torch.rand(shape, device=device, dtype=PERF_DTYPE) + 0.25
+def make_inputs(op: str, shape, dtype: torch.dtype, device: str = "cpu"):
+    # Values stay within +-60 for integers so int8 add does not overflow.
+    x = _random(shape, dtype, device, offset=0.25)
     if op == "add":
-        y = torch.rand(shape, device=device, dtype=PERF_DTYPE)
-        return (x, y), x + y
+        y = _random(shape, dtype, device)
+        return (x, y), (x.float() + y.float() if dtype.is_floating_point else x + y)
+    xf = x.float()
     expected = {
         "copy": lambda: x.clone(),
-        "exp": lambda: torch.exp(x),
-        "sum": lambda: torch.exp(x) / x.sum(dim=-1, keepdim=True),
-        "softmax": lambda: torch.softmax(x, dim=-1),
+        "exp": lambda: torch.exp(xf),
+        "sum": lambda: torch.exp(xf) / xf.sum(dim=-1, keepdim=True),
+        "softmax": lambda: torch.softmax(xf, dim=-1),
     }[op]()
     return (x,), expected
 
@@ -83,7 +128,7 @@ def op_count(op: str, shape) -> int:
         return 2 * m * n * k
     return FLOPS_PER_ELEMENT[op] * torch.Size(shape).numel()
 
-def op_unit(dtype: torch.dtype = PERF_DTYPE) -> str:
+def op_unit(dtype: torch.dtype) -> str:
     return "FLOPS" if dtype.is_floating_point else "OPS"
 
 def compare(op: str, out: torch.Tensor, expected: torch.Tensor):
@@ -93,6 +138,9 @@ def compare(op: str, out: torch.Tensor, expected: torch.Tensor):
         scale = float(expected.abs().max())
         return results._compare_tensors(out, expected, rtol=1e-2, atol=1e-2 * scale)
     return results._compare_tensors(out, expected)
+
+# Kernels compute in the test dtype as-is; a backend that does not support an
+# op for a dtype records the failure instead of the kernel upcasting.
 
 # CPU/CUDA kernels: one program per tile, launched over a grid.
 
@@ -126,8 +174,9 @@ def perf_rowwise(x_ptr, out_ptr, n_cols, BLOCK_N: tl.constexpr, MODE: tl.constex
 
 @triton.jit
 def perf_matmul(a_ptr, b_ptr, c_ptr, M, N, K, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-                BLOCK_K: tl.constexpr, PRECISION: tl.constexpr):
+                BLOCK_K: tl.constexpr, PRECISION: tl.constexpr, IS_INT: tl.constexpr):
     # Shapes are multiples of the block sizes, so no masks are needed.
+    # The store casts the accumulator to the output dtype.
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -135,9 +184,18 @@ def perf_matmul(a_ptr, b_ptr, c_ptr, M, N, K, BLOCK_M: tl.constexpr, BLOCK_N: tl
     offs_k = tl.arange(0, BLOCK_K)
     a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
     b_ptrs = b_ptr + offs_k[:, None] * N + offs_n[None, :]
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    if IS_INT:
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.int32)
+    else:
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for _ in range(0, K, BLOCK_K):
-        acc = tl.dot(tl.load(a_ptrs), tl.load(b_ptrs), acc, input_precision=PRECISION)
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
+        if IS_INT:
+            # Passing an int32 accumulator to tl.dot fails to compile (Triton 3.6).
+            acc += tl.dot(a, b)
+        else:
+            acc = tl.dot(a, b, acc, input_precision=PRECISION)
         a_ptrs += BLOCK_K
         b_ptrs += BLOCK_K * N
     tl.store(c_ptr + offs_m[:, None] * N + offs_n[None, :], acc)
@@ -221,7 +279,8 @@ def perf_tiled_matmul(a_ptr, b_ptr, c_ptr, batch: tl.constexpr, m: tl.constexpr,
                 strides=(m * n, n, 1), offsets=(0, i, j),
                 block_shape=(batch, BLOCK_M, BLOCK_N), order=(2, 1, 0),
             )
-            tl.store(c_block, tl.dot(a, tl.load(b_block)))
+            # tl.dot returns float32 (int32 for int8); convert to the output dtype.
+            tl.store(c_block, tl.dot(a, tl.load(b_block)).to(c_ptr.dtype.element_ty))
 
 def _make_perf_launch(op, inputs, out):
     device = benchmark._runtime_device()
@@ -230,9 +289,10 @@ def _make_perf_launch(op, inputs, out):
         (m, k), n = a.shape, b.shape[1]
         bm, bn, bk = MATMUL_BLOCKS[device]
         meta = {"num_warps": 8, "num_stages": 3} if device == "cuda" else {}
+        # input_precision only affects float32 inputs.
         return benchmark._make_launch(
             perf_matmul, (m // bm, n // bn), a, b, out, m, n, k,
-            bm, bn, bk, MATMUL_PRECISION[device], **meta,
+            bm, bn, bk, MATMUL_PRECISION[device], not a.dtype.is_floating_point, **meta,
         )
     x = inputs[0]
     if op in {"copy", "exp", "add"}:
@@ -252,37 +312,40 @@ def run_perf(args) -> Dict[str, results.TestResultInfo]:
     """Run the performance tests on the active CPU/CUDA backend."""
     records = {}
     device = benchmark._runtime_device()
-    ops = selected_perf_ops(args.only)
+    cases = selected_perf_cases(args.only, getattr(args, "dtypes", ""))
     matmul_shape = MATMUL_SHAPES[device]
     print(
-        f"\n[{device.upper()}] performance tests: {len(ops)} ops, "
-        f"shape={shape_str(PERF_SHAPE)}, matmul MxNxK={shape_str(matmul_shape)} {PERF_DTYPE_NAME}"
+        f"\n[{device.upper()}] performance tests: {len(cases)} op/dtype cases, "
+        f"shape={shape_str(PERF_SHAPE)}, matmul MxNxK={shape_str(matmul_shape)}"
     )
 
-    for op in ops:
+    for op, dtype_name in cases:
         t0 = time.time()
-        key = f"perf.{op}"
+        key = f"perf.{op}.{dtype_name}"
+        dtype = torch_dtype(dtype_name)
         try:
             if op == "matmul":
                 shape = matmul_shape
-                inputs, expected = make_matmul_inputs(shape, device)
-                detail = label(op, shape, MATMUL_PRECISION[device])
+                inputs, expected = make_matmul_inputs(shape, dtype, device)
+                precision = MATMUL_PRECISION[device] if dtype == torch.float32 else None
+                detail = label(op, shape, precision)
+                out = torch.empty(expected.shape, dtype=matmul_out_dtype(dtype), device=device)
             else:
                 shape = PERF_SHAPE
-                inputs, expected = make_inputs(op, shape, device)
+                inputs, expected = make_inputs(op, shape, dtype, device)
                 detail = label(op, shape)
-            out = torch.empty_like(expected)
+                out = torch.empty(expected.shape, dtype=dtype, device=device)
             launch = _make_perf_launch(op, inputs, out)
             benchmark.run_quietly(launch, benchmark._sync_device)
             ok, max_abs, max_rel = compare(op, out, expected)
             results._record_validation(
-                records, key, "perf", PERF_DTYPE_NAME, "perf", t0, ok,
+                records, key, "perf", dtype_name, "perf", t0, ok,
                 results._format_error_detail(detail, max_abs, max_rel, reference="torch"),
                 launch=launch, warmup=args.warmup, rep=args.rep,
                 io_bytes=benchmark._logical_io_bytes(inputs, out),
-                op_count=op_count(op, shape), op_unit=op_unit(),
+                op_count=op_count(op, shape), op_unit=op_unit(dtype),
             )
         except Exception as exc:
-            results._record(records, key, "perf", PERF_DTYPE_NAME, "perf", results.TestResult.ERROR, t0,
+            results._record(records, key, "perf", dtype_name, "perf", results.TestResult.ERROR, t0,
                             detail=f"{type(exc).__name__}: {exc}"[:1000])
     return records
