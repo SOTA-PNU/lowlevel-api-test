@@ -86,9 +86,10 @@ NPU_COMPUTE_EPS = 2.0 ** -9
 # when the dtype probe (a same-dtype copy) fails.
 NPU_F32_OUTPUT_OPS = {"dot"}
 
-# The NPU run covers the 37 tl ops below. Every other tl op is recorded as
-# "not supported yet" without compiling it, which saves a worker
-# process (and a compile) per case. To test one again, uncomment it.
+# The NPU run covers the 37 tl ops of the support list plus the 8 other ops
+# that pass. Every other tl op is recorded as "not supported yet" without
+# compiling it, which saves a worker process (and a compile) per case. To
+# test one again, uncomment it.
 NPU_NOT_SUPPORTED_YET = "not supported yet"
 NPU_TESTED_OPS = frozenset((
     "abs", "advance", "broadcast", "broadcast_to", "ceil", "cos",
@@ -98,18 +99,20 @@ NPU_TESTED_OPS = frozenset((
     "sigmoid", "sin", "softmax", "sqrt", "static_assert", "static_print",
     "static_range", "store", "sum", "tensor", "trans", "where",
     "zeros",
-    # "PropagateNan", "add", "arange", "argmax", "argmin", "associative_scan",
-    # "assume", "atomic_add", "atomic_and", "atomic_cas", "atomic_max", "atomic_min",
-    # "atomic_or", "atomic_xchg", "atomic_xor", "block_type", "cast", "cat",
-    # "cdiv", "clamp", "const", "constexpr", "cumprod", "cumsum",
-    # "debug_barrier", "device_assert", "device_print", "div_rn", "dot_scaled", "dtype",
-    # "exp2", "flip", "fma", "full", "function_type", "gather",
-    # "histogram", "inline_asm_elementwise", "interleave", "join", "max_constancy", "max_contiguous",
-    # "multiple_of", "num_programs", "nv_tma_desc_type", "pair_uniform_to_normal", "philox", "philox_impl",
-    # "pointer_type", "program_id", "rand", "rand4x", "randint", "randint4x",
-    # "randn", "randn4x", "ravel", "reduce", "sort", "split",
-    # "sqrt_rn", "str_to_ty", "swizzle2d", "uint_to_uniform_float", "umulhi", "view",
-    # "xor_sum", "zeros_like",
+    # outside the 37, passing
+    "add", "block_type", "const", "dtype", "function_type", "nv_tma_desc_type",
+    "pointer_type", "str_to_ty",
+    # not supported yet
+    # "PropagateNan", "arange", "argmax", "argmin", "associative_scan", "assume",
+    # "atomic_add", "atomic_and", "atomic_cas", "atomic_max", "atomic_min", "atomic_or",
+    # "atomic_xchg", "atomic_xor", "cast", "cat", "cdiv", "clamp",
+    # "constexpr", "cumprod", "cumsum", "debug_barrier", "device_assert", "device_print",
+    # "div_rn", "dot_scaled", "exp2", "flip", "fma", "full",
+    # "gather", "histogram", "inline_asm_elementwise", "interleave", "join", "max_constancy",
+    # "max_contiguous", "multiple_of", "num_programs", "pair_uniform_to_normal", "philox", "philox_impl",
+    # "program_id", "rand", "rand4x", "randint", "randint4x", "randn",
+    # "randn4x", "ravel", "reduce", "sort", "split", "sqrt_rn",
+    # "swizzle2d", "uint_to_uniform_float", "umulhi", "view", "xor_sum", "zeros_like",
 ))
 
 def _dot_out_dtype(dtype):

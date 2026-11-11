@@ -42,7 +42,7 @@ torch.compile(
 - dot 및 dot_scaled
 - 난수, 프로그램, 제어, 힌트, 타입 및 meta API
 
-NPU에서는 `npu.py`의 `NPU_TESTED_OPS`에 있는 37개 `tl` 연산자만 실행합니다. 그 밖의 연산자는
+NPU에서는 `npu.py`의 `NPU_TESTED_OPS`에 있는 `tl` 연산자만 실행합니다. 지원 목록 37개와, 그 밖에서 통과하는 8개입니다. 그 밖의 연산자는
 컴파일하지 않고 `not supported yet: not run on NPU`로 기록하며, 목록에서 주석 처리되어 있습니다.
 다시 테스트하려면 해당 줄의 주석을 풉니다.
 특정 `tl` 연산자만 선택적으로 실행하려면 `--only op1,op2`를 사용합니다.
