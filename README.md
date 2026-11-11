@@ -260,6 +260,11 @@ FLOPS = logical ops / elapsed seconds
 - NPU 커널은 fp32로만 저장할 수 있고 16비트 입력을 커널 안에서 fp32로 cast할 수 없습니다.
   `tl.dot`은 스스로 fp32를 반환하므로, NPU에서 부동소수 `dot`은 출력을 fp32로 받고 dtype
   probe가 실패한 dtype에서도 실행합니다.
+- 그 밖의 op는 NPU에서 fp16/bf16 케이스를 RBLN 모델과 같은 방식으로 실행합니다. 커널의
+  입출력은 fp32로 두고, 커널을 감싼 모델 그래프에서 `x.float()`로 올린 뒤 결과를 `.to(dtype)`로
+  내립니다. 커널 자체가 해당 dtype으로 컴파일된 것은 아니므로 detail에
+  `kernel_io=float32 (<dtype> cast in model graph)`를 기록합니다. 이 케이스들은 dtype probe
+  결과와 무관하게 실행합니다. 성능 테스트와 정수 dtype은 기존대로 probe를 따릅니다.
 
 그 밖의 테스트는 대부분 `fp32` 입력을 쓰며, 입력 dtype이 다른 테스트는 다음과 같습니다.
 

@@ -86,6 +86,30 @@ NPU_COMPUTE_EPS = 2.0 ** -9
 # when the dtype probe (a same-dtype copy) fails.
 NPU_F32_OUTPUT_OPS = {"dot"}
 
+# Every other op runs a 16-bit float case the way RBLN models do: the kernel
+# keeps float32 inputs and outputs, and the model graph around it converts
+# (x.float() before the custom op, .to(dtype) after it). The record says so
+# in its detail, because the kernel itself is not compiled for that dtype.
+NPU_GRAPH_CAST_DTYPES = {"float16", "bfloat16"}
+
+def _graph_cast(op, dtype_name):
+    return (
+        dtype_name in NPU_GRAPH_CAST_DTYPES and op not in NPU_F32_OUTPUT_OPS
+        and not op.startswith("perf_") and op != "dtype_probe"
+    )
+
+class GraphCastModel(torch.nn.Module):
+    """Runs `model` on float32 copies of its 16-bit float inputs and converts a
+    floating-point result back to `dtype`, all in the model graph."""
+    def __init__(self, model, dtype):
+        super().__init__()
+        self.model = model
+        self.dtype = dtype
+
+    def forward(self, *inputs):
+        out = self.model(*(t.float() if t.dtype == self.dtype else t for t in inputs))
+        return out.to(self.dtype) if out.is_floating_point() else out
+
 def _dot_out_dtype(dtype):
     return torch.float32 if dtype.is_floating_point else perf.matmul_out_dtype(dtype)
 
@@ -793,6 +817,8 @@ def _run_worker(op, warmup, rep):
     model, inputs, expected, normalize = (
         _make_perf_case(op) if op.startswith("perf_") or op == DTYPE_PROBE_OP else _make_test_case(op)
     )
+    if _graph_cast(op, _TEST_DTYPE):
+        model = GraphCastModel(model, perf.torch_dtype(_TEST_DTYPE))
     compiled = torch.compile(model, backend="rbln", dynamic=False, options={"mode": ["strict"]})
     actual = compiled(*inputs)
 
@@ -1010,7 +1036,7 @@ def _run_npu_tl(args, probe_failures=None):
                 detail="no RBLN compile/execute kernel adapter is defined",
             )
             continue
-        if case_dtype in probe_failures and op not in NPU_F32_OUTPUT_OPS:
+        if case_dtype in probe_failures and op not in NPU_F32_OUTPUT_OPS and not _graph_cast(op, case_dtype):
             results._record(
                 records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
                 detail=_probe_skip_detail(case_dtype, probe_failures),
@@ -1047,16 +1073,16 @@ def _run_npu_tl(args, probe_failures=None):
                 )
                 continue
 
+            label = f"rbln-custom-kernel:{op}"
+            if _graph_cast(op, case_dtype):
+                label += f"; kernel_io=float32 ({case_dtype} cast in model graph)"
             if payload.get("has_reference", True):
                 detail = results._format_error_detail(
-                    f"rbln-custom-kernel:{op}", payload["max_abs"],
+                    label, payload["max_abs"],
                     payload["max_rel"], reference="torch"
                 )
             else:
-                detail = (
-                    f"rbln-custom-kernel:{op}; "
-                    "target_result=N/A; sentinel_exec=PASS"
-                )
+                detail = f"{label}; target_result=N/A; sentinel_exec=PASS"
 
             results._record_validation(
                 records, key, "tl", dtype, "exec+perf", t0,
