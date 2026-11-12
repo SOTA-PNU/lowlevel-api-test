@@ -31,6 +31,10 @@ permissions:
 
 env:
   DOCKER_IMAGE: ghcr.io/sota-pnu/lowlevel-api-test
+  # Report to the lab CI/CD HUD (https://sota.pusan.ac.kr/cicd/). HUD steps never change this CI's result.
+  HUD_URL: ${{ vars.HUD_URL || 'https://sota.pusan.ac.kr/cicd' }}
+  HUD_TOKEN: ${{ secrets.HUD_TOKEN }}
+  HUD_EXPECTED_HW: cpu,gpu,npu
 
 jobs:
   detect-changes:
@@ -114,6 +118,20 @@ jobs:
           docker image prune -f
           docker system df
 
+      - name: "[HUD] Report build failure"
+        if: ${{ failure() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsS --max-time 20 "${HUD_URL}/client/hud_report.py" -o "${RUNNER_TEMP}/hud_report.py"
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          export RUN_ID=$($HUD start --commit "${GITHUB_SHA:0:7} (Run ${GITHUB_RUN_ATTEMPT})" --repo "${GITHUB_REPOSITORY}" \
+            --expected-hw "${HUD_EXPECTED_HW}" \
+            --url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}")
+          $HUD job build cpu failure
+          $HUD failure cpu build --summary "Docker image build failed (see CI log)"
+          $HUD finish failure
+
   build-gpu:
     name: Build GPU Image
     runs-on: [self-hosted, gpu-runner]
@@ -153,6 +171,20 @@ jobs:
           docker image prune -f
           docker system df
 
+      - name: "[HUD] Report build failure"
+        if: ${{ failure() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsS --max-time 20 "${HUD_URL}/client/hud_report.py" -o "${RUNNER_TEMP}/hud_report.py"
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          export RUN_ID=$($HUD start --commit "${GITHUB_SHA:0:7} (Run ${GITHUB_RUN_ATTEMPT})" --repo "${GITHUB_REPOSITORY}" \
+            --expected-hw "${HUD_EXPECTED_HW}" \
+            --url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}")
+          $HUD job build gpu failure
+          $HUD failure gpu build --summary "Docker image build failed (see CI log)"
+          $HUD finish failure
+
   build-npu:
     name: Build NPU Image
     runs-on: [self-hosted, npu-runner]
@@ -188,6 +220,20 @@ jobs:
           docker image prune -f
           docker system df
 
+      - name: "[HUD] Report build failure"
+        if: ${{ failure() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsS --max-time 20 "${HUD_URL}/client/hud_report.py" -o "${RUNNER_TEMP}/hud_report.py"
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          export RUN_ID=$($HUD start --commit "${GITHUB_SHA:0:7} (Run ${GITHUB_RUN_ATTEMPT})" --repo "${GITHUB_REPOSITORY}" \
+            --expected-hw "${HUD_EXPECTED_HW}" \
+            --url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}")
+          $HUD job build npu failure
+          $HUD failure npu build --summary "Docker image build failed (see CI log)"
+          $HUD finish failure
+
   test-cpu:
     name: Test CPU Image
     runs-on: [self-hosted, cpu-runner]
@@ -200,6 +246,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: "[HUD] Start"
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsS --max-time 20 "${HUD_URL}/client/hud_report.py" -o "${RUNNER_TEMP}/hud_report.py"
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          export RUN_ID=$($HUD start --commit "${GITHUB_SHA:0:7} (Run ${GITHUB_RUN_ATTEMPT})" --repo "${GITHUB_REPOSITORY}" \
+            --expected-hw "${HUD_EXPECTED_HW}" \
+            --url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}")
+          $HUD job lint cpu skipped
+          $HUD job build cpu ${{ needs.build-cpu.result }}
+          $HUD job correctness cpu running
+          $HUD job benchmark cpu running
 
       - name: Run tests
         shell: bash
@@ -214,6 +274,15 @@ jobs:
             exit 1
           fi
           bash docker/run-docker.sh test-cpu
+
+      - name: "[HUD] Report"
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          $HUD triton cpu results.json --status "${{ job.status }}"
+          $HUD finish "${{ job.status == 'success' && 'success' || 'failure' }}"
 
       - name: Summarize results
         if: ${{ always() && hashFiles('results.json') != '' }}
@@ -241,6 +310,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: "[HUD] Start"
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsS --max-time 20 "${HUD_URL}/client/hud_report.py" -o "${RUNNER_TEMP}/hud_report.py"
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          export RUN_ID=$($HUD start --commit "${GITHUB_SHA:0:7} (Run ${GITHUB_RUN_ATTEMPT})" --repo "${GITHUB_REPOSITORY}" \
+            --expected-hw "${HUD_EXPECTED_HW}" \
+            --url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}")
+          $HUD job lint gpu skipped
+          $HUD job build gpu ${{ needs.build-gpu.result }}
+          $HUD job correctness gpu running
+          $HUD job benchmark gpu running
+
       - name: Run tests 
         shell: bash
         env:
@@ -254,6 +337,15 @@ jobs:
             exit 1
           fi
           bash docker/run-docker.sh test-cuda
+
+      - name: "[HUD] Report"
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          $HUD triton gpu results.json --status "${{ job.status }}"
+          $HUD finish "${{ job.status == 'success' && 'success' || 'failure' }}"
 
       - name: Summarize results
         if: ${{ always() && hashFiles('results.json') != '' }}
@@ -281,6 +373,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: "[HUD] Start"
+        continue-on-error: true
+        shell: bash
+        run: |
+          curl -fsS --max-time 20 "${HUD_URL}/client/hud_report.py" -o "${RUNNER_TEMP}/hud_report.py"
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          export RUN_ID=$($HUD start --commit "${GITHUB_SHA:0:7} (Run ${GITHUB_RUN_ATTEMPT})" --repo "${GITHUB_REPOSITORY}" \
+            --expected-hw "${HUD_EXPECTED_HW}" \
+            --url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}")
+          $HUD job lint npu skipped
+          $HUD job build npu ${{ needs.build-npu.result }}
+          $HUD job correctness npu running
+          $HUD job benchmark npu running
+
       - name: Run tests
         shell: bash
         env:
@@ -294,6 +400,15 @@ jobs:
             exit 1
           fi
           bash docker/run-docker.sh test-npu
+
+      - name: "[HUD] Report"
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          HUD="python3 ${RUNNER_TEMP}/hud_report.py"
+          $HUD triton npu results.json --status "${{ job.status }}"
+          $HUD finish "${{ job.status == 'success' && 'success' || 'failure' }}"
 
       - name: Summarize results
         if: ${{ always() && hashFiles('results.json') != '' }}
