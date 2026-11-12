@@ -75,6 +75,59 @@ _ACTIVE_OP = os.environ.get("RBLN_TRITON_TEST_OP", "exp")
 # dtype of the worker's test case (functional op/dtype cases and perf tests)
 _TEST_DTYPE = os.environ.get("RBLN_TEST_DTYPE", "float32")
 
+# Custom kernels compute in a 16-bit float with a 9-bit fraction whatever the
+# input dtype: the RTOSA of a float32 kernel is typed dlf16, and tl.abs of
+# float32 inputs spaced 2**-14 apart in [1, 1.25] returns values 2**-9 apart.
+NPU_COMPUTE_EPS = 2.0 ** -9
+# A kernel can only store float32 (bf16/fp16 output aborts with "For output,
+# only f32 or f64 is supported") and cannot cast a 16-bit input to float32
+# ('rtosa.cast' is illegal). tl.dot returns float32 by itself, so it is the
+# one op that runs with 16-bit float inputs; it stores float32 and runs even
+# when the dtype probe (a same-dtype copy) fails.
+NPU_F32_OUTPUT_OPS = {"dot"}
+
+# The NPU run covers the 37 tl ops of the support list plus the 8 other ops
+# that pass. Every other tl op is recorded as "not supported yet" without
+# compiling it, which saves a worker process (and a compile) per case. To
+# test one again, uncomment it.
+NPU_NOT_SUPPORTED_YET = "not supported yet"
+NPU_TESTED_OPS = frozenset((
+    "abs", "advance", "broadcast", "broadcast_to", "ceil", "cos",
+    "dot", "erf", "exp", "expand_dims", "fdiv", "floor",
+    "load", "log", "log2", "make_block_ptr", "max", "maximum",
+    "min", "minimum", "permute", "range", "reshape", "rsqrt",
+    "sigmoid", "sin", "softmax", "sqrt", "static_assert", "static_print",
+    "static_range", "store", "sum", "tensor", "trans", "where",
+    "zeros",
+    # outside the 37, passing
+    "add", "block_type", "const", "dtype", "function_type", "nv_tma_desc_type",
+    "pointer_type", "str_to_ty",
+    # not supported yet
+    # "PropagateNan", "arange", "argmax", "argmin", "associative_scan", "assume",
+    # "atomic_add", "atomic_and", "atomic_cas", "atomic_max", "atomic_min", "atomic_or",
+    # "atomic_xchg", "atomic_xor", "cast", "cat", "cdiv", "clamp",
+    # "constexpr", "cumprod", "cumsum", "debug_barrier", "device_assert", "device_print",
+    # "div_rn", "dot_scaled", "exp2", "flip", "fma", "full",
+    # "gather", "histogram", "inline_asm_elementwise", "interleave", "join", "max_constancy",
+    # "max_contiguous", "multiple_of", "num_programs", "pair_uniform_to_normal", "philox", "philox_impl",
+    # "program_id", "rand", "rand4x", "randint", "randint4x", "randn",
+    # "randn4x", "ravel", "reduce", "sort", "split", "sqrt_rn",
+    # "swizzle2d", "uint_to_uniform_float", "umulhi", "view", "xor_sum", "zeros_like",
+))
+
+def _dot_out_dtype(dtype):
+    return torch.float32 if dtype.is_floating_point else perf.matmul_out_dtype(dtype)
+
+def _npu_error_bound(op, inputs, expected):
+    """Per-element tolerance for the 9-bit compute precision. A 64-term dot
+    product rounds every partial sum, so its error scales with |a| @ |b|, not
+    with the result: measured max 0.85 * NPU_COMPUTE_EPS * (|a| @ |b|) over
+    float32/bfloat16/float16 inputs, which the fixed 1e-2 tolerance rejects
+    where the result cancels to near zero."""
+    if op == "dot" and inputs[0].is_floating_point():
+        return NPU_COMPUTE_EPS * (inputs[0].float().abs() @ inputs[1].float().abs())
+    return accumulation_error_bound(op, inputs[0], expected)
+
 def _active_mode(mapping, default=0):
     return mapping.get(_ACTIVE_OP, default)
 
@@ -148,13 +201,13 @@ def shared_shape_fake(x: torch.Tensor) -> torch.Tensor:
 
 @triton_op("rbln_triton_ops::shared_dot", mutates_args={})
 def shared_dot_wrapper(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    out = torch.empty_like(a, dtype=perf.matmul_out_dtype(a.dtype))
+    out = torch.empty_like(a, dtype=_dot_out_dtype(a.dtype))
     warmup(RBLN_KERNELS.dot, a, b, out, RBLN_BATCH, DOT_SIZE)
     return out
 
 @register_fake("rbln_triton_ops::shared_dot")
 def shared_dot_fake(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(a, dtype=perf.matmul_out_dtype(a.dtype))
+    return torch.empty_like(a, dtype=_dot_out_dtype(a.dtype))
 
 @triton_op("rbln_triton_ops::shared_memory", mutates_args={})
 def shared_memory_wrapper(x: torch.Tensor) -> torch.Tensor:
@@ -778,7 +831,7 @@ def _run_worker(op, warmup, rep):
     elif op.startswith("perf_"):
         ok, max_abs, max_rel = perf.compare(op.removeprefix("perf_"), actual, expected)
     else:
-        bound = accumulation_error_bound(op, inputs[0], expected)
+        bound = _npu_error_bound(op, inputs, expected)
         ok, max_abs, max_rel = (
             results._compare_tensors(normalize(actual), normalize(expected)) if bound is None
             else results._compare_with_error_bound(actual, expected, bound)
@@ -817,7 +870,9 @@ _DIAGNOSTICS = (
     ),
     (r"ValueError\(([^\n]+)\)", "Triton frontend error: ValueError({})"),
     (r"CompilationError:\s*([^\n]+)", "Triton compilation error: {}"),
-    (r"RBLNCompileError:\s*([^\n]+)", "RBLN compile error: {}"),
+    # The message is often quoted inside a longer warning: "(RuntimeError:
+    # RBLNCompileError: Graph Optimization: [UNEXPECTED_GRAPH] ). Falling back ..."
+    (r"RBLNCompileError:\s*([^\n)]+)", "RBLN compile error: {}"),
     (r"RBLNRuntimeError:\s*([^\n]+)", "RBLN model compiler error: {}"),
 )
 
@@ -840,20 +895,29 @@ def _compiler_error_detail(output, returncode):
         signal = {6: "SIGABRT", 11: "SIGSEGV"}.get(
             -returncode, f"signal {-returncode}"
         )
-        where = re.search(r"UNREACHABLE executed at [^\n]*?([\w.]+:\d+)", _ANSI_ESCAPE.sub("", output))
+        clean = _ANSI_ESCAPE.sub("", output)
+        where = re.search(r"UNREACHABLE executed at [^\n]*?([\w.]+:\d+)", clean)
         suffix = f": UNREACHABLE at {where.group(1)}" if where else ""
+        # llvm_unreachable prints its message on the line before the location.
+        reason = re.search(r"([^\n]+)\nUNREACHABLE executed at", clean)
+        if reason and reason.group(1).strip():
+            suffix += f" ({reason.group(1).strip()})"
         return f"RBLN compiler crash ({signal}) during Triton/RTOSA compilation{suffix}"
 
-    clean = _ANSI_ESCAPE.sub("", output)
+    clean = _ANSI_ESCAPE.sub("", output).replace("\r", "\n")
 
     compilation = _compilation_error_detail(clean)
     if compilation:
         return compilation
 
+    # Compiler source location printed next to a failure with no message of
+    # its own (e.g. UNEXPECTED_GRAPH), so different causes stay distinguishable.
+    source = re.search(r"third_party/rebel/lib/[\w/]*?(\w+\.(?:cpp|h):\d{1,4})(?=20\d\d-|\D|$)", clean)
     for pattern, template in _DIAGNOSTICS:
         match = re.search(pattern, clean)
         if match and match.group(1).strip():
-            return template.format(match.group(1).strip())
+            detail = template.format(match.group(1).strip())
+            return detail + (f" at {source.group(1)}" if source and "RBLN compile error" in detail else "")
 
     for exception_name in ("AttributeError", "RuntimeError", "TypeError"):
         matches = re.findall(rf"{exception_name}:\s*([^\n]+)", clean)
@@ -955,6 +1019,12 @@ def _run_npu_tl(args, probe_failures=None):
     for op, case_dtype in cases:
         t0 = time.time()
         key = tl_case_key(op, case_dtype)
+        if op not in NPU_TESTED_OPS:
+            results._record(
+                records, key, "tl", case_dtype or "-", "kernel", results.TestResult.ERROR, t0,
+                detail=f"{NPU_NOT_SUPPORTED_YET}: not run on NPU",
+            )
+            continue
         dtype = case_dtype or _report_dtype(op)
         # Validate meta APIs
         if op in TL_META_COMPILE:
@@ -975,7 +1045,7 @@ def _run_npu_tl(args, probe_failures=None):
                 detail="no RBLN compile/execute kernel adapter is defined",
             )
             continue
-        if case_dtype in probe_failures:
+        if case_dtype in probe_failures and op not in NPU_F32_OUTPUT_OPS:
             results._record(
                 records, key, "tl", dtype, "kernel", results.TestResult.ERROR, t0,
                 detail=_probe_skip_detail(case_dtype, probe_failures),
