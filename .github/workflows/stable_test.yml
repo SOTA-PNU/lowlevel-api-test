@@ -221,7 +221,7 @@ jobs:
             -f docker/Dockerfile \
             -t "${DOCKER_IMAGE}:${DOCKER_IMAGE_TAG}" \
             --secret id=rbln_pip_config,env=RBLN_PIP_CONFIG \
-            --secret "id=rbln_compiler_wheel,src=${wheel}" \
+            --build-context "rbln_wheels=${wheel%/*}" \
             --build-arg "RBLN_COMPILER_SHA256=${wheel_sha256}" \
             --build-arg BUILD_MODE=npu \
             .

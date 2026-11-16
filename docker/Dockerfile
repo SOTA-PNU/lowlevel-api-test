@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 
+# Empty fallback for CPU/CUDA builds; NPU builds override this stage with a local wheel context.
+FROM scratch AS rbln_wheels
+
 FROM ubuntu:22.04
 
 ARG BUILD_MODE=cuda
@@ -94,16 +97,18 @@ RUN if [ "$BUILD_MODE" = "cpu" ]; then \
     fi
 
 RUN --mount=type=secret,id=rbln_pip_config,required=false \
-    --mount=type=secret,id=rbln_compiler_wheel,target=/tmp/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl,required=false \
+    --mount=type=bind,from=rbln_wheels,target=/mnt/rbln_wheels,readonly \
     if [ "$BUILD_MODE" = "npu" ]; then \
+        wheel=/mnt/rbln_wheels/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl; \
+        test -s "$wheel" || \
+            { echo "ERROR: NPU build requires compiler wheel in rbln_wheels context: $wheel" >&2; exit 1; }; \
         test -s /run/secrets/rbln_pip_config || \
             { echo "ERROR: NPU build requires BuildKit secret rbln_pip_config" >&2; exit 1; }; \
         test -n "$RBLN_COMPILER_SHA256" || \
             { echo "ERROR: NPU build requires RBLN_COMPILER_SHA256" >&2; exit 1; }; \
-        echo "$RBLN_COMPILER_SHA256  /tmp/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl" | sha256sum -c - && \
+        echo "$RBLN_COMPILER_SHA256  $wheel" | sha256sum -c - && \
         PIP_CONFIG_FILE=/run/secrets/rbln_pip_config \
-            /opt/triton-venv/bin/pip install --no-cache-dir \
-            /tmp/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl; \
+            /opt/triton-venv/bin/pip install --no-cache-dir "$wheel"; \
     fi
 
 # Check the installation and versions of installed packages
