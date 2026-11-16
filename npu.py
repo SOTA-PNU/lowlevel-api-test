@@ -624,10 +624,10 @@ def _make_test_case(op):
     if op == "block_type":
         return BlockTypeModel(), (x,), None, normalize
     if op == "tensor":
-        return TensorCompileModel(), (x,), torch.exp(x), normalize
+        return TensorCompileModel(), (x,), x, normalize
     if op in TL_META_COMPILE:
         model = ConstCompileModel() if op == "const" else MetaCompileModel()
-        expected = torch.exp(x) if op == "inline_asm_elementwise" else None
+        expected = x if op == "inline_asm_elementwise" else None
         return model, (x,), expected, normalize
     if op == "dot_scaled":
         a = torch.ones((16, 64), dtype=torch.bfloat16)
@@ -641,7 +641,7 @@ def _make_test_case(op):
         ).reshape(
             RBLN_BATCH, ROWS, COLS
         )
-        return ZerosModel(), (x,), torch.exp(torch.maximum(x, torch.zeros_like(x))), normalize
+        return ZerosModel(), (x,), torch.maximum(x, torch.zeros_like(x)), normalize
     if op in UNARY_MODES:
         if op in ROUNDING_UNARY:
             x = stepped_input(dtype=dt)
@@ -671,19 +671,19 @@ def _make_test_case(op):
         if isinstance(reduced, tuple):
             reduced = reduced.values
         if op == "max":
-            expected = torch.exp(x - reduced)
+            expected = x - reduced
         elif op == "min":
-            expected = torch.exp(reduced - x)
+            expected = reduced - x
         else:
-            expected = torch.exp(x) / reduced
+            expected = x.float().sum(dim=2, keepdim=True).expand_as(x)
         return ReduceModel(), (x,), expected, normalize
     if op in SHAPE_MODES:
         if op in {"broadcast", "broadcast_to"}:
-            expected = torch.exp(x - x.sum(dim=2, keepdim=True))
+            expected = x.float().sum(dim=2, keepdim=True).expand_as(x)
         elif op == "expand_dims":
-            expected = torch.exp(x)
+            expected = x
         elif op == "reshape":
-            expected = torch.exp(x)
+            expected = x
         elif op == "permute":
             expected = x.permute(0, 2, 1).contiguous()
         else:
@@ -693,7 +693,7 @@ def _make_test_case(op):
         a, b, expected = dot_inputs(dtype=dt)
         return DotModel(), (a, b), expected, normalize
     if op in MEMORY_MODES:
-        return MemoryModel(), (x,), torch.exp(x), normalize
+        return MemoryModel(), (x,), x, normalize
     if op in MISC_MODES:
         x = signed_input(dtype=dt)
         y = signed_input(dtype=dt)
@@ -717,8 +717,8 @@ def _make_test_case(op):
         base = torch.arange(COLS).reshape(1, 1, COLS).expand_as(x).float()
         expected = {
             "arange": base,
-            "full": torch.exp(x + 3.0),
-            "zeros_like": torch.exp(x),
+            "full": torch.full_like(x, 3.0),
+            "zeros_like": torch.zeros_like(x),
         }[op]
         return CreationModel(), (x,), expected, normalize
     if op in HINT_MODES:
@@ -808,11 +808,7 @@ def _make_test_case(op):
         else:
             expected = x
         return MetaRuntimeModel(), (x, y), expected, normalize
-    expected = (
-        None if op in {"static_assert", "static_print"}
-        else 3.0 * x if op == "static_range"
-        else torch.exp(x)
-    )
+    expected = 3.0 * x if op == "static_range" else x
     return ControlModel(), (x,), expected, normalize
 
 _RESULT_MARKER = "RBLN_OP_RESULT="

@@ -721,13 +721,12 @@ def shared_reduce(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
     else:
         reduced = tl.sum(x, axis=2, keep_dims=True)
     if mode == 0:
-        out = tl.exp(x - reduced)
+        out = x - reduced
     elif mode == 1:
-        out = tl.exp(reduced - x)
+        out = reduced - x
     else:
-        numerator = tl.exp(x)
-        out = numerator / reduced
-    tl.store(out_block, out)
+        out = tl.broadcast_to(reduced, (batch, rows, cols))
+    tl.store(out_block, out.to(out_ptr.dtype.element_ty))
 
 @triton.jit
 def shared_zeros(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, cols: tl.constexpr):
@@ -743,7 +742,7 @@ def shared_zeros(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, cols: 
     )
     x = tl.load(x_block)
     zeros = tl.zeros((batch, rows, cols), x.dtype)
-    tl.store(out_block, tl.exp(tl.maximum(x, zeros)))
+    tl.store(out_block, tl.maximum(x, zeros).to(out_ptr.dtype.element_ty))
 
 @triton.jit
 def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
@@ -766,7 +765,7 @@ def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
             out, _ = tl.broadcast(reduced, zeros)
         else:
             out = tl.broadcast_to(reduced, (batch, rows, cols))
-        tl.store(out_block, tl.exp(x - out))
+        tl.store(out_block, out.to(out_ptr.dtype.element_ty))
     elif mode == 2:
         x_block = tl.make_block_ptr(
             base=x_ptr, shape=(batch, rows, cols),
@@ -781,7 +780,7 @@ def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         x = tl.load(x_block)
         expanded = tl.expand_dims(x, axis=0)
         out = tl.reshape(expanded, (batch, rows, cols))
-        tl.store(out_block, tl.exp(out))
+        tl.store(out_block, out.to(out_ptr.dtype.element_ty))
     elif mode == 3:
         x_block = tl.make_block_ptr(
             base=x_ptr, shape=(batch, rows, cols),
@@ -796,7 +795,7 @@ def shared_shape(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         x = tl.load(x_block)
         flat = tl.reshape(x, (rows, cols))
         out = tl.reshape(flat, (batch, rows, cols))
-        tl.store(out_block, tl.exp(out))
+        tl.store(out_block, out.to(out_ptr.dtype.element_ty))
     elif mode == 4:
         x_block = tl.make_block_ptr(
             base=x_ptr, shape=(batch, rows, cols),
@@ -862,10 +861,10 @@ def shared_memory(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
             strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
             block_shape=(batch, half, cols), order=(2, 1, 0),
         )
-        tl.store(out_block, tl.exp(tl.load(x_block)))
+        tl.store(out_block, tl.load(x_block))
         x_block = tl.advance(x_block, (0, half, 0))
         out_block = tl.advance(out_block, (0, half, 0))
-        tl.store(out_block, tl.exp(tl.load(x_block)))
+        tl.store(out_block, tl.load(x_block))
     else:
         x_block = tl.make_block_ptr(
             base=x_ptr, shape=(batch, rows, cols),
@@ -877,7 +876,7 @@ def shared_memory(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
             strides=(rows * cols, cols, 1), offsets=(0, 0, 0),
             block_shape=(batch, rows, cols), order=(2, 1, 0),
         )
-        tl.store(out_block, tl.exp(tl.load(x_block)))
+        tl.store(out_block, tl.load(x_block))
 
 @triton.jit
 def shared_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr, 
@@ -902,7 +901,7 @@ def shared_control(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
             tl.static_print("RBLN Triton static_print smoke test")
         else:
             tl.static_assert(cols == 64, "shared test expects 64 columns")
-        out = tl.exp(x)
+        out = x
     tl.store(out_block, out)
 
 @triton.jit
@@ -931,9 +930,9 @@ def shared_creation(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         base = tl.arange(0, cols)[None, :]
         out = x * 0.0 + base
     elif mode == 1:
-        out = tl.exp(x + tl.full((batch * rows, cols), 3.0, x.dtype))
+        out = tl.full((batch * rows, cols), 3.0, x.dtype)
     elif mode == 2:
-        out = tl.exp(x + tl.zeros_like(x))
+        out = tl.zeros_like(x)
     else:
         out = tl.cdiv(x, 2).to(tl.float32)
     tl.store(out_ptr + offsets, out)
@@ -954,7 +953,7 @@ def shared_hint(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
         hinted = tl.max_contiguous(x, [1, 1])
     else:
         hinted = tl.max_constancy(x, [1, 1])
-    tl.store(out_ptr + offsets, tl.exp(hinted))
+    tl.store(out_ptr + offsets, hinted)
 
 @triton.jit
 def shared_program(x_ptr, out_ptr, batch: tl.constexpr, rows: tl.constexpr,
@@ -1205,7 +1204,7 @@ def shared_block_type(x_ptr, out_ptr, batch: tl.constexpr,
     x = tl.load(xb)
     expected_type = tl.block_type(x.dtype, [1, 64, 64])
     _ = expected_type
-    tl.store(ob, tl.exp(x))
+    tl.store(ob, x)
 
 @triton.jit
 def shared_meta_compile(x_ptr, out_ptr, batch: tl.constexpr,
@@ -1242,7 +1241,7 @@ def shared_meta_compile(x_ptr, out_ptr, batch: tl.constexpr,
         out = bits.to(tl.float32, bitcast=True)
     else:
         out = x
-    tl.store(ob, tl.exp(out))
+    tl.store(ob, out)
 
 @triton.jit
 def shared_const_compile(x_ptr: tl.const, out_ptr, batch: tl.constexpr,
@@ -1251,7 +1250,7 @@ def shared_const_compile(x_ptr: tl.const, out_ptr, batch: tl.constexpr,
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
     ob = tl.make_block_ptr(out_ptr, (batch, rows, cols), (rows * cols, cols, 1),
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
-    tl.store(ob, tl.exp(tl.load(xb)))
+    tl.store(ob, tl.load(xb))
 
 @triton.jit
 def shared_tensor_compile(x_ptr, out_ptr, batch: tl.constexpr,
@@ -1262,7 +1261,7 @@ def shared_tensor_compile(x_ptr, out_ptr, batch: tl.constexpr,
                            (0, 0, 0), (batch, rows, cols), (2, 1, 0))
     x = tl.load(xb)
     rebuilt = tl.tensor(x.handle, x.type)
-    tl.store(ob, tl.exp(rebuilt))
+    tl.store(ob, rebuilt)
 
 @triton.jit
 def shared_dot_scaled(a_ptr, b_ptr, b_scale_ptr, out_ptr,
@@ -1327,10 +1326,8 @@ INPUT_DTYPE = torch.float32
 
 FLOAT_DTYPES = ("float32", "float16", "bfloat16")
 NUMERIC_DTYPES = FLOAT_DTYPES + ("int32", "int8")
-# Ops whose kernel runs only the op itself run once per dtype and are recorded
-# as tl.<op>.<dtype>; a dtype the backend does not support is an ERROR. Kernels
-# that wrap their result in tl.exp (reduce, shape, memory, ...) stay float32:
-# at other dtypes they would fail on tl.exp, not on the op under test.
+# Ops configured here run once per dtype and are recorded as tl.<op>.<dtype>.
+# A dtype the backend cannot compile is reported as an ERROR.
 TL_DTYPES = {
     **{op: FLOAT_DTYPES for op in UNARY_MODES},
     "abs": NUMERIC_DTYPES,
@@ -1348,6 +1345,10 @@ TL_DTYPES = {
     **{op: NUMERIC_DTYPES for op in LAYOUT_MODES},
     "argmax": NUMERIC_DTYPES,
     "argmin": NUMERIC_DTYPES,
+    **{op: FLOAT_DTYPES for op in (
+        *REDUCE_MODES, *SHAPE_MODES, *MEMORY_MODES, *CONTROL_MODES,
+        "range", "tensor", "zeros",
+    )},
 }
 
 def tl_cases(ops, dtypes: str = "") -> Tuple[Tuple[str, Optional[str]], ...]:
@@ -1478,7 +1479,7 @@ def run_shared_tl(args, triton_module, tl_module):
                 kernel, kernel_args, expected = (
                     kernels.tensor_compile,
                     (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS),
-                    torch.exp(x),
+                    x,
                 )
             elif name == "zeros":
                 x = torch.linspace(
@@ -1488,7 +1489,7 @@ def run_shared_tl(args, triton_module, tl_module):
                 kernel, kernel_args, expected = (
                     kernels.zeros,
                     (x, torch.empty_like(x), RBLN_BATCH, ROWS, COLS),
-                    torch.exp(torch.maximum(x, torch.zeros_like(x))),
+                    torch.maximum(x, torch.zeros_like(x)),
                 )
             elif name in UNARY_MODES:
                 if name in ROUNDING_UNARY:
@@ -1532,11 +1533,11 @@ def run_shared_tl(args, triton_module, tl_module):
                 if isinstance(reduced, tuple):
                     reduced = reduced.values
                 if name == "max":
-                    expected = torch.exp(x - reduced)
+                    expected = x - reduced
                 elif name == "min":
-                    expected = torch.exp(reduced - x)
+                    expected = reduced - x
                 else:
-                    expected = torch.exp(x) / reduced
+                    expected = x.float().sum(dim=2, keepdim=True).expand_as(x)
                 kernel, kernel_args = kernels.reduce, (
                     x, out, RBLN_BATCH, ROWS, COLS, REDUCE_MODES[name],
                 )
@@ -1544,13 +1545,13 @@ def run_shared_tl(args, triton_module, tl_module):
                 mode = SHAPE_MODES[name]
                 if name in {"broadcast", "broadcast_to"}:
                     out = torch.empty_like(x)
-                    expected = torch.exp(x - x.sum(dim=2, keepdim=True))
+                    expected = x.float().sum(dim=2, keepdim=True).expand_as(x)
                 elif name == "expand_dims":
                     out = torch.empty_like(x)
-                    expected = torch.exp(x)
+                    expected = x
                 elif name == "reshape":
                     out = torch.empty_like(x)
-                    expected = torch.exp(x)
+                    expected = x
                 elif name == "permute":
                     out = torch.empty((RBLN_BATCH, COLS, ROWS), device=device, dtype=x.dtype)
                     expected = x.permute(0, 2, 1).contiguous()
@@ -1567,13 +1568,11 @@ def run_shared_tl(args, triton_module, tl_module):
                 kernel, kernel_args, expected = (
                     kernels.memory,
                     (x, out, RBLN_BATCH, ROWS, x.shape[2], MEMORY_MODES[name]),
-                    torch.exp(x),
+                    x,
                 )
             elif name in CONTROL_MODES:
                 out = torch.empty_like(x)
-                expected = (
-                    3.0 * x if name == "static_range" else None
-                )
+                expected = 3.0 * x if name == "static_range" else x
                 kernel, kernel_args = kernels.control, (
                     x, out, RBLN_BATCH, ROWS, COLS, CONTROL_MODES[name],
                 )
@@ -1608,8 +1607,8 @@ def run_shared_tl(args, triton_module, tl_module):
                 ).expand_as(x).float()
                 expected = {
                     "arange": base,
-                    "full": torch.exp(x + 3.0),
-                    "zeros_like": torch.exp(x),
+                    "full": torch.full_like(x, 3.0),
+                    "zeros_like": torch.zeros_like(x),
                 }[name]
                 kernel, kernel_args = kernels.creation, (
                     x, out, RBLN_BATCH, ROWS, COLS, CREATION_MODES[name],
@@ -1807,9 +1806,7 @@ def run_shared_tl(args, triton_module, tl_module):
             elif name in TL_META_COMPILE:
                 validate_meta_symbol(name, tl, x.dtype)
                 out = torch.empty_like(x)
-                expected = (
-                    torch.exp(x) if name == "inline_asm_elementwise" else None
-                )
+                expected = x if name == "inline_asm_elementwise" else None
                 if name == "const":
                     kernel, kernel_args = kernels.const_compile, (
                         x, out, RBLN_BATCH, ROWS, COLS,
