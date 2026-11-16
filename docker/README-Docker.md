@@ -32,11 +32,14 @@ docker build \
   -f docker/Dockerfile .
 ```
 
-NPU 빌드는 `rebel-compiler` 설치를 위해 BuildKit secret `rbln_pip_config`가 필요합니다.
+NPU 빌드는 러너의 `/opt/actions-runner/wheels/`에 있는 컴파일러 wheel과,
+의존성 설치에 사용할 BuildKit secret `rbln_pip_config`가 필요합니다.
 
 ```bash
 docker build \
   --secret id=rbln_pip_config,src=/path/to/pip.conf \
+  --secret id=rbln_compiler_wheel,src=/opt/actions-runner/wheels/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl \
+  --build-arg RBLN_COMPILER_SHA256="$(sha256sum /opt/actions-runner/wheels/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl | cut -d ' ' -f 1)" \
   --build-arg BUILD_MODE=npu \
   -t ghcr.io/sota-pnu/lowlevel-api-test:npu-latest \
   -f docker/Dockerfile .
@@ -52,7 +55,9 @@ docker build \
 | `cuda` | CUDA toolkit 12.8 + cu128 torch/triton wheel | `docker/Dockerfile:53`, `:83` |
 | `npu` | CPU용 torch + `rebel-compiler` | `docker/Dockerfile:97`, `:122` |
 
-`rebel-compiler` 버전은 `docker/Dockerfile:13`의 `RBLN_COMPILER_VERSION`에서 정합니다.
+`rebel-compiler` 버전은 `docker/Dockerfile`의 `RBLN_COMPILER_VERSION`과 wheel 파일명이 함께 정합니다.
+wheel을 교체할 때는 Dockerfile의 secret 마운트 경로와 CI의 wheel 경로도 같이 바꾸세요.
+SHA-256 빌드 인자는 wheel 변경 시 Docker 캐시를 갱신하고 파일 무결성을 확인합니다.
 
 ### 3. Docker 컨테이너 실행
 

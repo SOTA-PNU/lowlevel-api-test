@@ -5,7 +5,8 @@ FROM ubuntu:22.04
 ARG BUILD_MODE=cuda
 ARG CUDA_VERSION=12.8
 ARG PYTORCH_CUDA_VERSION=cu128
-ARG RBLN_COMPILER_VERSION=0.11.1.post1
+ARG RBLN_COMPILER_VERSION=0.11.1.post2.dev2+g2995098f.prod
+ARG RBLN_COMPILER_SHA256
 ARG CUDA_TORCH_VERSION_CU128=2.11.0
 ARG CUDA_TRITON_VERSION_CU128=3.6.0
 ARG NPU_TORCH_VERSION=2.8.0
@@ -93,12 +94,16 @@ RUN if [ "$BUILD_MODE" = "cpu" ]; then \
     fi
 
 RUN --mount=type=secret,id=rbln_pip_config,required=false \
+    --mount=type=secret,id=rbln_compiler_wheel,target=/tmp/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl,required=false \
     if [ "$BUILD_MODE" = "npu" ]; then \
         test -s /run/secrets/rbln_pip_config || \
             { echo "ERROR: NPU build requires BuildKit secret rbln_pip_config" >&2; exit 1; }; \
+        test -n "$RBLN_COMPILER_SHA256" || \
+            { echo "ERROR: NPU build requires RBLN_COMPILER_SHA256" >&2; exit 1; }; \
+        echo "$RBLN_COMPILER_SHA256  /tmp/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl" | sha256sum -c - && \
         PIP_CONFIG_FILE=/run/secrets/rbln_pip_config \
             /opt/triton-venv/bin/pip install --no-cache-dir \
-            "rebel-compiler==${RBLN_COMPILER_VERSION}"; \
+            /tmp/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl; \
     fi
 
 # Check the installation and versions of installed packages
@@ -106,7 +111,7 @@ RUN python -m pip check && \
     if [ "$BUILD_MODE" = "cuda" ]; then \
         python -c "import triton; import triton.language; print('pip-installed Triton', triton.__version__, triton.__file__)"; \
     elif [ "$BUILD_MODE" = "npu" ]; then \
-        python -c "import rebel; print('rebel-compiler', rebel.__version__); from rebel.triton.backends import backends; print('rebel.triton backends:', sorted(backends)); assert 'rebel' in backends, 'rebel Triton backend not registered in the image'"; \
+        python -c "import rebel; from importlib.metadata import version; assert version('rebel-compiler') == '${RBLN_COMPILER_VERSION}'; print('rebel-compiler', rebel.__version__); from rebel.triton.backends import backends; print('rebel.triton backends:', sorted(backends)); assert 'rebel' in backends, 'rebel Triton backend not registered in the image'"; \
     elif [ "$BUILD_MODE" = "cpu" ]; then \
         python -c "import triton; from triton.backends import backends; print('triton-cpu', triton.__version__); assert 'cpu' in backends, 'CPU Triton backend not registered in the image'"; \
     fi

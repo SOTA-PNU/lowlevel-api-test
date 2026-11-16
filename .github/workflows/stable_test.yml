@@ -208,13 +208,21 @@ jobs:
             exit 1
           fi
 
-          echo ">>> Building NPU image with pip-installed rebel-compiler"
+          wheel="/opt/actions-runner/wheels/rebel_compiler-0.11.1.post2.dev2+g2995098f.prod-cp310-cp310-manylinux_2_34_x86_64.whl"
+          if [ ! -r "$wheel" ]; then
+            echo "::error::NPU runner cannot read compiler wheel: $wheel"
+            exit 1
+          fi
+          wheel_sha256="$(sha256sum "$wheel" | cut -d ' ' -f 1)"
+          echo ">>> Building NPU image with local rebel-compiler wheel"
           
           docker build \
             --cache-from "${DOCKER_IMAGE}:${DOCKER_IMAGE_TAG}" \
             -f docker/Dockerfile \
             -t "${DOCKER_IMAGE}:${DOCKER_IMAGE_TAG}" \
             --secret id=rbln_pip_config,env=RBLN_PIP_CONFIG \
+            --secret "id=rbln_compiler_wheel,src=${wheel}" \
+            --build-arg "RBLN_COMPILER_SHA256=${wheel_sha256}" \
             --build-arg BUILD_MODE=npu \
             .
           docker image prune -f
